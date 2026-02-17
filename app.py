@@ -127,21 +127,35 @@ def check_mail():
             mail.store(mail_id, "+FLAGS", "\\Seen")
             continue
 
-        # Collect PDF attachments
+               # Collect PDFs (works even if Gmail marks them as inline)
         pdfs = []  # list of (filename, bytes)
         if msg.is_multipart():
             for part in msg.walk():
-                disp = (part.get("Content-Disposition") or "")
-                if "attachment" not in disp.lower():
+                # skip container parts
+                if part.get_content_maintype() == "multipart":
                     continue
+
                 filename = part.get_filename()
-                if not filename:
-                    continue
-                filename_dec = safe_decode(filename)
+                content_type = (part.get_content_type() or "").lower()
+
+                filename_dec = safe_decode(filename) if filename else ""
+
+                is_pdf = False
                 if filename_dec.lower().endswith(".pdf"):
-                    data = part.get_payload(decode=True)
-                    if data:
-                        pdfs.append((filename_dec, data))
+                    is_pdf = True
+                elif content_type == "application/pdf":
+                    is_pdf = True
+
+                if not is_pdf:
+                    continue
+
+                data = part.get_payload(decode=True)
+                if data:
+                    # If there is no filename, create one
+                    if not filename_dec:
+                        filename_dec = "weighment.pdf"
+                    pdfs.append((filename_dec, data))
+
         else:
             # rare case: single-part attachment
             filename = msg.get_filename()
