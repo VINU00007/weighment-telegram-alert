@@ -189,19 +189,27 @@ def check_mail():
                 continue
 
             msg_text = (
-                "📄 Weighment Slip Details\n\n"
-                f"RST No: {info.get('RST','')}\n"
-                f"Vehicle: {info.get('Vehicle','')}\n"
-                f"Party: {info.get('Party','')}\n"
-                f"Place: {info.get('Place','')}\n"
-                f"Material: {info.get('Material','')}\n"
-                f"Bags: {info.get('Bags','')}\n\n"
-                f"Gross (Kg): {info.get('GrossKg','')}  | Time: {info.get('GrossDT','')}\n"
-                f"Tare  (Kg): {info.get('TareKg','')}  | Time: {info.get('TareDT','')}\n"
-                f"Net   (Kg): {info.get('NetKg','')}  | Time: {info.get('NetDT','')}\n\n"
-                f"Email Date: {received_ts}\n"
-                f"PDF: {fname}"
-            )
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📄 *WEIGHMENT SLIP ALERT*\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    f"🆔 RST No        : {info.get('RST','')}\n"
+    f"🚛 Vehicle       : {info.get('Vehicle','')}\n"
+    f"🏢 Party         : {info.get('Party','')}\n"
+    f"📍 Place         : {info.get('Place','')}\n"
+    f"🌾 Material      : {info.get('Material','')}\n"
+    f"🧺 Bags           : {info.get('Bags','')}\n\n"
+    "──────── WEIGHT DETAILS ────────\n"
+    f"⚖️ Gross  : {info.get('GrossKg','')} Kg\n"
+    f"⏰ Time   : {info.get('GrossDT','')}\n\n"
+    f"⚖️ Tare   : {info.get('TareKg','')} Kg\n"
+    f"⏰ Time   : {info.get('TareDT','')}\n\n"
+    f"⚖️ Net    : {info.get('NetKg','')} Kg\n"
+    f"⏰ Time   : {info.get('NetDT','')}\n\n"
+    "──────── EMAIL INFO ────────\n"
+    f"📨 Received : {received_ts}\n"
+    f"📎 File     : {fname}\n"
+    "━━━━━━━━━━━━━━━━━━━━━━"
+)
             send_telegram(msg_text)
 
         # Mark mail as seen after processing
