@@ -67,7 +67,7 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     party = pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")
     place = pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")
     material = normalize_material(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"))
-    bags = pick(text, r"BAGS\s*:\s*(\d+)")
+    bags = pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)")
 
    dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
