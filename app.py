@@ -69,9 +69,12 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     material = normalize_material(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"))
     bags = pick(text, r"BAGS\s*:\s*(\d+)")
 
-    gross = pick(text, r"Gross\.\s*:\s*(\d+)")
-    tare = pick(text, r"Tare\.\s*:\s*(\d+)")
-    net = pick(text, r"Net\.\s*:\s*(\d+)")
+   dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
+
+gross_dt = pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
+tare_dt  = pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
+net_dt   = pick(text, r"Net\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)  # may be blank if slip doesn't print it
+
 
     # Date/time strings shown on slip lines
     gross_dt = pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*(.+)")
