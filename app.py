@@ -18,9 +18,14 @@ IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
 # ===== In-Memory Storage =====
-vehicle_log = {}  # {date: set(vehicle_numbers)}
-completed_weighments = []  # list of dicts
+vehicle_log = {}
+completed_weighments = []
 last_hour_sent = None
+
+
+# ================= TIME (IST) =================
+def now_ist():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 
 # ================= TELEGRAM =================
@@ -55,8 +60,7 @@ def pick(text: str, pattern: str) -> str:
 
 
 def normalize_text(s: str) -> str:
-    s = (s or "").strip()
-    return re.sub(r"\s+", " ", s)
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
 def parse_dt(dt_str):
@@ -99,29 +103,27 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 def process_weighment(info):
     global vehicle_log, completed_weighments
 
-    today_key = datetime.now().strftime("%Y-%m-%d")
+    today_key = now_ist().strftime("%Y-%m-%d")
     if today_key not in vehicle_log:
         vehicle_log[today_key] = set()
 
     vehicle = info["Vehicle"]
     net_kg = int(info["NetKg"] or 0)
     material = info["Material"]
+
     exit_dt_obj = parse_dt(info["GrossDT"])
     tare_dt_obj = parse_dt(info["TareDT"])
 
-    # Yard Time
     duration_text = "N/A"
     if exit_dt_obj and tare_dt_obj:
         diff = exit_dt_obj - tare_dt_obj
         mins = int(diff.total_seconds() // 60)
         duration_text = f"{mins // 60}h {mins % 60}m"
 
-    # Flags
     high_load_flag = "⬆ HIGH LOAD\n" if net_kg > 20000 else ""
     repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[today_key] else ""
     vehicle_log[today_key].add(vehicle)
 
-    # Store for hourly summary
     if exit_dt_obj:
         completed_weighments.append({
             "time": exit_dt_obj,
@@ -156,7 +158,7 @@ def process_weighment(info):
 def send_hourly_status():
     global completed_weighments
 
-    now = datetime.now()
+    now = now_ist()
     one_hour_ago = now - timedelta(hours=1)
     hour_label = now.strftime("%I %p").lstrip("0")
 
@@ -213,10 +215,17 @@ def check_mail():
             continue
 
         for part in msg.walk():
-            if part.get_content_type() == "application/pdf":
+            filename = part.get_filename()
+            content_type = part.get_content_type()
+
+            if (
+                (filename and filename.lower().endswith(".pdf"))
+                or content_type == "application/pdf"
+            ):
                 data = part.get_payload(decode=True)
-                info = extract_from_pdf_bytes(data)
-                process_weighment(info)
+                if data:
+                    info = extract_from_pdf_bytes(data)
+                    process_weighment(info)
 
         mail.store(mail_id, "+FLAGS", "\\Seen")
 
@@ -227,9 +236,8 @@ def check_mail():
 if __name__ == "__main__":
     while True:
         try:
-            now = datetime.now()
+            now = now_ist()
 
-            # Hourly trigger
             if now.minute == 0:
                 hour_marker = now.strftime("%Y-%m-%d %H")
                 if hour_marker != last_hour_sent:
