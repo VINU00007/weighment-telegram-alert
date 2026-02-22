@@ -7,7 +7,6 @@ import time
 import re
 from io import BytesIO
 from datetime import datetime, timedelta
-
 import pdfplumber
 
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -18,13 +17,13 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-# In-memory storage
+# ===== In-Memory Storage =====
 vehicle_log = {}  # {date: set(vehicle_numbers)}
-completed_weighments = []  # list of dicts with time, net, material, high_load
-
+completed_weighments = []  # list of dicts
 last_hour_sent = None
 
 
+# ================= TELEGRAM =================
 def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -36,6 +35,7 @@ def send_telegram(message: str):
     r.raise_for_status()
 
 
+# ================= HELPERS =================
 def safe_decode(value):
     if not value:
         return ""
@@ -73,6 +73,7 @@ def format_dt(dt_str):
     return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else dt_str
 
 
+# ================= PDF EXTRACTION =================
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         text = pdf.pages[0].extract_text() or ""
@@ -94,32 +95,33 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     }
 
 
+# ================= PROCESS WEIGHMENT =================
 def process_weighment(info):
     global vehicle_log, completed_weighments
 
-    now_date = datetime.now().strftime("%Y-%m-%d")
-    if now_date not in vehicle_log:
-        vehicle_log[now_date] = set()
+    today_key = datetime.now().strftime("%Y-%m-%d")
+    if today_key not in vehicle_log:
+        vehicle_log[today_key] = set()
 
     vehicle = info["Vehicle"]
     net_kg = int(info["NetKg"] or 0)
     material = info["Material"]
     exit_dt_obj = parse_dt(info["GrossDT"])
-
-    # Yard time
-    duration_text = "N/A"
     tare_dt_obj = parse_dt(info["TareDT"])
+
+    # Yard Time
+    duration_text = "N/A"
     if exit_dt_obj and tare_dt_obj:
         diff = exit_dt_obj - tare_dt_obj
         mins = int(diff.total_seconds() // 60)
         duration_text = f"{mins // 60}h {mins % 60}m"
 
+    # Flags
     high_load_flag = "⬆ HIGH LOAD\n" if net_kg > 20000 else ""
-    repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[now_date] else ""
+    repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[today_key] else ""
+    vehicle_log[today_key].add(vehicle)
 
-    vehicle_log[now_date].add(vehicle)
-
-    # Store for hourly
+    # Store for hourly summary
     if exit_dt_obj:
         completed_weighments.append({
             "time": exit_dt_obj,
@@ -150,6 +152,7 @@ def process_weighment(info):
     send_telegram(message.strip())
 
 
+# ================= HOURLY STATUS =================
 def send_hourly_status():
     global completed_weighments
 
@@ -190,6 +193,7 @@ def send_hourly_status():
     send_telegram(message)
 
 
+# ================= EMAIL CHECK =================
 def check_mail():
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
@@ -219,12 +223,13 @@ def check_mail():
     mail.logout()
 
 
+# ================= MAIN LOOP =================
 if __name__ == "__main__":
     while True:
         try:
             now = datetime.now()
-            global last_hour_sent
 
+            # Hourly trigger
             if now.minute == 0:
                 hour_marker = now.strftime("%Y-%m-%d %H")
                 if hour_marker != last_hour_sent:
