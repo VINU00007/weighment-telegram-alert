@@ -6,7 +6,7 @@ import requests
 import time
 import re
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pdfplumber
 
@@ -18,8 +18,12 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-# ---- MEMORY FOR REPEAT VEHICLE (resets if app restarts) ----
+# In-memory storage
 vehicle_log = {}  # {date: set(vehicle_numbers)}
+completed_weighments = []  # list of dicts with time, net, material, high_load
+
+last_hour_sent = None
+
 
 def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -35,17 +39,14 @@ def send_telegram(message: str):
 def safe_decode(value):
     if not value:
         return ""
-    try:
-        parts = decode_header(value)
-        out = []
-        for part, enc in parts:
-            if isinstance(part, bytes):
-                out.append(part.decode(enc or "utf-8", errors="replace"))
-            else:
-                out.append(str(part))
-        return "".join(out)
-    except Exception:
-        return str(value)
+    parts = decode_header(value)
+    out = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            out.append(part.decode(enc or "utf-8", errors="replace"))
+        else:
+            out.append(str(part))
+    return "".join(out)
 
 
 def pick(text: str, pattern: str) -> str:
@@ -55,65 +56,141 @@ def pick(text: str, pattern: str) -> str:
 
 def normalize_text(s: str) -> str:
     s = (s or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
+    return re.sub(r"\s+", " ", s)
 
 
 def parse_dt(dt_str):
-    try:
-        return datetime.strptime(dt_str, "%d-%b-%y %I:%M:%S %p")
-    except:
+    for fmt in ("%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"):
         try:
-            return datetime.strptime(dt_str, "%d-%b-%Y %I:%M:%S %p")
+            return datetime.strptime(dt_str, fmt)
         except:
-            return None
+            continue
+    return None
 
 
 def format_dt(dt_str):
     dt_obj = parse_dt(dt_str)
-    if not dt_obj:
-        return dt_str
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else dt_str
 
 
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         text = pdf.pages[0].extract_text() or ""
 
-    rst = pick(text, r"RST\s*:\s*(\d+)")
-    vehicle = pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)")
-    party = pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")
-    place = pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")
-    material = normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"))
-    bags = pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)")
-
-    gross = pick(text, r"Gross\.\s*:\s*(\d+)")
-    tare = pick(text, r"Tare\.\s*:\s*(\d+)")
-    net = pick(text, r"Net\.\s*:\s*(\d+)")
-
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
-    gross_dt = pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
-    tare_dt = pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
-
     return {
-        "RST": rst,
-        "Vehicle": vehicle,
-        "Party": normalize_text(party),
-        "Place": normalize_text(place),
-        "Material": material,
-        "Bags": bags,
-        "GrossKg": gross,
-        "GrossDT": gross_dt,
-        "TareKg": tare,
-        "TareDT": tare_dt,
-        "NetKg": net,
+        "RST": pick(text, r"RST\s*:\s*(\d+)"),
+        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
+        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")),
+        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")),
+        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO")),
+        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
+        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
+        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
+        "NetKg": pick(text, r"Net\.\s*:\s*(\d+)"),
+        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
+        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
     }
 
 
-def check_mail():
-    global vehicle_log
+def process_weighment(info):
+    global vehicle_log, completed_weighments
 
+    now_date = datetime.now().strftime("%Y-%m-%d")
+    if now_date not in vehicle_log:
+        vehicle_log[now_date] = set()
+
+    vehicle = info["Vehicle"]
+    net_kg = int(info["NetKg"] or 0)
+    material = info["Material"]
+    exit_dt_obj = parse_dt(info["GrossDT"])
+
+    # Yard time
+    duration_text = "N/A"
+    tare_dt_obj = parse_dt(info["TareDT"])
+    if exit_dt_obj and tare_dt_obj:
+        diff = exit_dt_obj - tare_dt_obj
+        mins = int(diff.total_seconds() // 60)
+        duration_text = f"{mins // 60}h {mins % 60}m"
+
+    high_load_flag = "⬆ HIGH LOAD\n" if net_kg > 20000 else ""
+    repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[now_date] else ""
+
+    vehicle_log[now_date].add(vehicle)
+
+    # Store for hourly
+    if exit_dt_obj:
+        completed_weighments.append({
+            "time": exit_dt_obj,
+            "net": net_kg,
+            "material": material,
+            "high": net_kg > 20000
+        })
+
+    message = (
+        "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+        f"🧾 RST : {info['RST']}   🚛 {vehicle}\n"
+        f"👤 {info['Party']}\n"
+        f"📍 PLACE : {info['Place']}\n"
+        f"🌾 MATERIAL : {material}\n"
+        f"📦 BAGS : {info['Bags']}\n\n"
+        f"⟪ IN  ⟫ {format_dt(info['TareDT'])}\n"
+        f"⚖ Tare  : {info['TareKg']} Kg\n"
+        f"⟪ OUT ⟫ {format_dt(info['GrossDT'])}\n"
+        f"⚖ Gross : {info['GrossKg']} Kg\n\n"
+        f"🔵 NET LOAD : {net_kg} Kg\n"
+        f"🟡 YARD TIME : {duration_text}\n"
+        f"{high_load_flag}"
+        f"{repeat_flag}\n"
+        "*▣ ENTRY LOGGED*\n"
+        "*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
+    )
+
+    send_telegram(message.strip())
+
+
+def send_hourly_status():
+    global completed_weighments
+
+    now = datetime.now()
+    one_hour_ago = now - timedelta(hours=1)
+    hour_label = now.strftime("%I %p").lstrip("0")
+
+    recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
+
+    if not recent:
+        message = (
+            f"⏱ HOURLY STATUS – {hour_label}\n\n"
+            "No Weighments Completed In The Past Hour."
+        )
+        send_telegram(message)
+        return
+
+    total_net = sum(w["net"] for w in recent)
+    total_loads = len(recent)
+    high_count = sum(1 for w in recent if w["high"])
+
+    material_totals = {}
+    for w in recent:
+        material_totals[w["material"]] = material_totals.get(w["material"], 0) + w["net"]
+
+    material_lines = "\n".join(
+        f"{m} : {material_totals[m]:,} Kg" for m in material_totals
+    )
+
+    message = (
+        f"⏱ HOURLY STATUS – {hour_label}\n\n"
+        f"Weighments Completed : {total_loads}\n"
+        f"Total Net This Hour  : {total_net:,} Kg\n\n"
+        f"{material_lines}\n\n"
+        f"⬆ High Loads : {high_count}"
+    )
+
+    send_telegram(message)
+
+
+def check_mail():
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
@@ -121,94 +198,21 @@ def check_mail():
     status, messages = mail.search(None, "(UNSEEN)")
     mail_ids = messages[0].split()
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    if today_str not in vehicle_log:
-        vehicle_log[today_str] = set()
-
     for mail_id in mail_ids:
         status, msg_data = mail.fetch(mail_id, "(RFC822)")
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
         subject = safe_decode(msg.get("Subject"))
-
         if not any(k in subject.upper() for k in KEYWORDS):
             mail.store(mail_id, "+FLAGS", "\\Seen")
             continue
 
-        pdfs = []
-
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_maintype() == "multipart":
-                    continue
-
-                filename = part.get_filename()
-                content_type = (part.get_content_type() or "").lower()
-                filename_dec = safe_decode(filename) if filename else ""
-
-                if filename_dec.lower().endswith(".pdf") or content_type == "application/pdf":
-                    data = part.get_payload(decode=True)
-                    if data:
-                        pdfs.append((filename_dec or "weighment.pdf", data))
-
-        if not pdfs:
-            mail.store(mail_id, "+FLAGS", "\\Seen")
-            continue
-
-        for fname, data in pdfs:
-            try:
+        for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
+                data = part.get_payload(decode=True)
                 info = extract_from_pdf_bytes(data)
-            except Exception as e:
-                send_telegram(f"PDF Parse Error\n{fname}\n{e}")
-                continue
-
-            gross_dt_obj = parse_dt(info.get("GrossDT", ""))
-            tare_dt_obj = parse_dt(info.get("TareDT", ""))
-
-            duration_text = "N/A"
-            if gross_dt_obj and tare_dt_obj:
-                diff = gross_dt_obj - tare_dt_obj
-                total_minutes = int(diff.total_seconds() // 60)
-                hours = total_minutes // 60
-                minutes = total_minutes % 60
-                duration_text = f"{hours}h {minutes}m"
-
-            net_kg = int(info.get("NetKg") or 0)
-            vehicle = info.get("Vehicle", "")
-
-            # --- Smart Flags ---
-            high_load_flag = ""
-            if net_kg > 20000:
-                high_load_flag = "⬆ HIGH LOAD\n"
-
-            repeat_flag = ""
-            if vehicle in vehicle_log[today_str]:
-                repeat_flag = "🔁 REPEAT VEHICLE\n"
-            else:
-                vehicle_log[today_str].add(vehicle)
-
-            msg_text = (
-                "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-                f"🧾 RST : {info.get('RST','')}   🚛 {vehicle}\n"
-                f"👤 {info.get('Party','')}\n"
-                f"📍 PLACE : {info.get('Place','')}\n"
-                f"🌾 MATERIAL : {info.get('Material','')}\n"
-                f"📦 BAGS : {info.get('Bags','')}\n\n"
-                f"⟪ IN  ⟫ {format_dt(info.get('TareDT',''))}\n"
-                f"⚖ Tare  : {info.get('TareKg','')} Kg\n"
-                f"⟪ OUT ⟫ {format_dt(info.get('GrossDT',''))}\n"
-                f"⚖ Gross : {info.get('GrossKg','')} Kg\n\n"
-                f"🔵 NET LOAD : {net_kg} Kg\n"
-                f"🟡 YARD TIME : {duration_text}\n"
-                f"{high_load_flag}"
-                f"{repeat_flag}\n"
-                "*▣ ENTRY LOGGED*\n"
-                "*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
-            )
-
-            send_telegram(msg_text.strip())
+                process_weighment(info)
 
         mail.store(mail_id, "+FLAGS", "\\Seen")
 
@@ -218,7 +222,18 @@ def check_mail():
 if __name__ == "__main__":
     while True:
         try:
+            now = datetime.now()
+            global last_hour_sent
+
+            if now.minute == 0:
+                hour_marker = now.strftime("%Y-%m-%d %H")
+                if hour_marker != last_hour_sent:
+                    send_hourly_status()
+                    last_hour_sent = hour_marker
+
             check_mail()
+
         except Exception as e:
             print("Error:", e)
+
         time.sleep(30)
