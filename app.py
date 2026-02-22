@@ -6,6 +6,7 @@ import requests
 import time
 import re
 from io import BytesIO
+from datetime import datetime
 
 import pdfplumber
 
@@ -15,7 +16,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
-
 KEYWORDS = ["WEIGHMENT"]
 
 
@@ -59,6 +59,23 @@ def normalize_material(s: str) -> str:
     return s
 
 
+def parse_dt(dt_str):
+    try:
+        return datetime.strptime(dt_str, "%d-%b-%y %I:%M:%S %p")
+    except:
+        try:
+            return datetime.strptime(dt_str, "%d-%b-%Y %I:%M:%S %p")
+        except:
+            return None
+
+
+def format_dt(dt_str):
+    dt_obj = parse_dt(dt_str)
+    if not dt_obj:
+        return dt_str
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
+
+
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         text = (pdf.pages[0].extract_text() or "")
@@ -78,7 +95,6 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 
     gross_dt = pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
     tare_dt = pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
-    net_dt = pick(text, r"Net\.\s*:\s*\d+\s*Kgs\s*" + dt_pat)
 
     return {
         "RST": rst,
@@ -92,7 +108,6 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
         "TareKg": tare,
         "TareDT": tare_dt,
         "NetKg": net,
-        "NetDT": net_dt,
     }
 
 
@@ -110,8 +125,6 @@ def check_mail():
         msg = email.message_from_bytes(raw_email)
 
         subject = safe_decode(msg.get("Subject"))
-        from_email = safe_decode(msg.get("From"))
-        received_ts = msg.get("Date") or ""
 
         if not any(k in subject.upper() for k in KEYWORDS):
             mail.store(mail_id, "+FLAGS", "\\Seen")
@@ -126,23 +139,12 @@ def check_mail():
 
                 filename = part.get_filename()
                 content_type = (part.get_content_type() or "").lower()
-
                 filename_dec = safe_decode(filename) if filename else ""
 
-                is_pdf = False
-                if filename_dec.lower().endswith(".pdf"):
-                    is_pdf = True
-                elif content_type == "application/pdf":
-                    is_pdf = True
-
-                if not is_pdf:
-                    continue
-
-                data = part.get_payload(decode=True)
-                if data:
-                    if not filename_dec:
-                        filename_dec = "weighment.pdf"
-                    pdfs.append((filename_dec, data))
+                if filename_dec.lower().endswith(".pdf") or content_type == "application/pdf":
+                    data = part.get_payload(decode=True)
+                    if data:
+                        pdfs.append((filename_dec or "weighment.pdf", data))
 
         if not pdfs:
             mail.store(mail_id, "+FLAGS", "\\Seen")
@@ -155,27 +157,35 @@ def check_mail():
                 send_telegram(f"⚠️ PDF Parse Error\n{fname}\n{e}")
                 continue
 
+            gross_dt_obj = parse_dt(info.get("GrossDT", ""))
+            tare_dt_obj = parse_dt(info.get("TareDT", ""))
+
+            duration_text = "N/A"
+            if gross_dt_obj and tare_dt_obj:
+                diff = gross_dt_obj - tare_dt_obj
+                total_minutes = int(diff.total_seconds() // 60)
+                hours = total_minutes // 60
+                minutes = total_minutes % 60
+                duration_text = f"{hours}h {minutes}m"
+
+            status_entry = "▣ ENTRY LOGGED"
+            status_closed = "▣ LOAD SEALED & CLOSED" if info.get("NetKg") else ""
+
             msg_text = (
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "📄 *WEIGHMENT SLIP ALERT*\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🆔 RST No        : {info.get('RST','')}\n"
-                f"🚛 Vehicle       : {info.get('Vehicle','')}\n"
-                f"🏢 Party         : {info.get('Party','')}\n"
-                f"📍 Place         : {info.get('Place','')}\n"
-                f"🌾 Material      : {info.get('Material','')}\n"
-                f"🧺 Bags           : {info.get('Bags','')}\n\n"
-                "──────── WEIGHT DETAILS ────────\n"
-                f"⚖️ Gross  : {info.get('GrossKg','')} Kg\n"
-                f"⏰ Time   : {info.get('GrossDT','')}\n\n"
-                f"⚖️ Tare   : {info.get('TareKg','')} Kg\n"
-                f"⏰ Time   : {info.get('TareDT','')}\n\n"
-                f"⚖️ Net    : {info.get('NetKg','')} Kg\n"
-                f"⏰ Time   : {info.get('NetDT','')}\n\n"
-                "──────── EMAIL INFO ────────\n"
-                f"📨 Received : {received_ts}\n"
-                f"📎 File     : {fname}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━"
+                "🟩🟩  🚨 WEIGHMENT ALERT 🚨  🟩🟩\n"
+                f"🧾 SLIP : {info.get('RST','')}   🚛 {info.get('Vehicle','')}\n"
+                f"👤 {info.get('Party','')}   📦 {info.get('Material','')}\n"
+                f"🎒 BAGS : {info.get('Bags','')}\n"
+                "────────────────────\n"
+                f"⟪ IN  ⟫ {format_dt(info.get('TareDT',''))}\n"
+                f"⚖ Tare  : {info.get('TareKg','')} Kg\n"
+                f"⟪ OUT ⟫ {format_dt(info.get('GrossDT',''))}\n"
+                f"⚖ Gross : {info.get('GrossKg','')} Kg\n"
+                "────────────────────\n"
+                f"*🔵 NET LOAD : {info.get('NetKg','')} Kg*\n"
+                f"🟡 YARD TIME : {duration_text}\n"
+                f"{status_entry}\n"
+                f"{status_closed}"
             )
 
             send_telegram(msg_text)
