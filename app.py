@@ -18,10 +18,10 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
+# ---- MEMORY FOR REPEAT VEHICLE (resets if app restarts) ----
+vehicle_log = {}  # {date: set(vehicle_numbers)}
 
 def send_telegram(message: str):
-    if len(message) > 3800:
-        message = message[:3800] + "\n\n...(truncated)"
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -112,12 +112,19 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 
 
 def check_mail():
+    global vehicle_log
+
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
     status, messages = mail.search(None, "(UNSEEN)")
     mail_ids = messages[0].split()
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if today_str not in vehicle_log:
+        vehicle_log[today_str] = set()
 
     for mail_id in mail_ids:
         status, msg_data = mail.fetch(mail_id, "(RFC822)")
@@ -168,26 +175,40 @@ def check_mail():
                 minutes = total_minutes % 60
                 duration_text = f"{hours}h {minutes}m"
 
+            net_kg = int(info.get("NetKg") or 0)
+            vehicle = info.get("Vehicle", "")
+
+            # --- Smart Flags ---
+            high_load_flag = ""
+            if net_kg > 20000:
+                high_load_flag = "⬆ HIGH LOAD\n"
+
+            repeat_flag = ""
+            if vehicle in vehicle_log[today_str]:
+                repeat_flag = "🔁 REPEAT VEHICLE\n"
+            else:
+                vehicle_log[today_str].add(vehicle)
+
             msg_text = (
                 "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-                f"🧾 SLIP : {info.get('RST','')}   🚛 {info.get('Vehicle','')}\n"
+                f"🧾 RST : {info.get('RST','')}   🚛 {vehicle}\n"
                 f"👤 {info.get('Party','')}\n"
                 f"📍 PLACE : {info.get('Place','')}\n"
                 f"🌾 MATERIAL : {info.get('Material','')}\n"
                 f"📦 BAGS : {info.get('Bags','')}\n\n"
-                "────────────────────\n"
                 f"⟪ IN  ⟫ {format_dt(info.get('TareDT',''))}\n"
                 f"⚖ Tare  : {info.get('TareKg','')} Kg\n"
                 f"⟪ OUT ⟫ {format_dt(info.get('GrossDT',''))}\n"
-                f"⚖ Gross : {info.get('GrossKg','')} Kg\n"
-                "────────────────────\n"
-                f"🔵 NET LOAD : {info.get('NetKg','')} Kg\n"
+                f"⚖ Gross : {info.get('GrossKg','')} Kg\n\n"
+                f"🔵 NET LOAD : {net_kg} Kg\n"
                 f"🟡 YARD TIME : {duration_text}\n"
-                "▣ ENTRY LOGGED\n"
-                "▣ LOAD SEALED & CLOSED"
+                f"{high_load_flag}"
+                f"{repeat_flag}\n"
+                "*▣ ENTRY LOGGED*\n"
+                "*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
             )
 
-            send_telegram(msg_text)
+            send_telegram(msg_text.strip())
 
         mail.store(mail_id, "+FLAGS", "\\Seen")
 
