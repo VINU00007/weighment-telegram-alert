@@ -53,7 +53,7 @@ def pick(text: str, pattern: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def normalize_material(s: str) -> str:
+def normalize_text(s: str) -> str:
     s = (s or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -78,13 +78,13 @@ def format_dt(dt_str):
 
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        text = (pdf.pages[0].extract_text() or "")
+        text = pdf.pages[0].extract_text() or ""
 
     rst = pick(text, r"RST\s*:\s*(\d+)")
     vehicle = pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)")
     party = pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")
     place = pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")
-    material = normalize_material(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"))
+    material = normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"))
     bags = pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)")
 
     gross = pick(text, r"Gross\.\s*:\s*(\d+)")
@@ -99,8 +99,8 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     return {
         "RST": rst,
         "Vehicle": vehicle,
-        "Party": normalize_material(party),
-        "Place": place,
+        "Party": normalize_text(party),
+        "Place": normalize_text(place),
         "Material": material,
         "Bags": bags,
         "GrossKg": gross,
@@ -154,7 +154,7 @@ def check_mail():
             try:
                 info = extract_from_pdf_bytes(data)
             except Exception as e:
-                send_telegram(f"⚠️ PDF Parse Error\n{fname}\n{e}")
+                send_telegram(f"PDF Parse Error\n{fname}\n{e}")
                 continue
 
             gross_dt_obj = parse_dt(info.get("GrossDT", ""))
@@ -168,24 +168,23 @@ def check_mail():
                 minutes = total_minutes % 60
                 duration_text = f"{hours}h {minutes}m"
 
-            status_entry = "▣ ENTRY LOGGED"
-            status_closed = "▣ LOAD SEALED & CLOSED" if info.get("NetKg") else ""
-
             msg_text = (
-                "🟩🟩  🚨 WEIGHMENT ALERT 🚨  🟩🟩\n"
+                "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
                 f"🧾 SLIP : {info.get('RST','')}   🚛 {info.get('Vehicle','')}\n"
-                f"👤 {info.get('Party','')}   📦 {info.get('Material','')}\n"
-                f"🎒 BAGS : {info.get('Bags','')}\n"
+                f"👤 {info.get('Party','')}\n"
+                f"📍 PLACE : {info.get('Place','')}\n"
+                f"🌾 MATERIAL : {info.get('Material','')}\n"
+                f"📦 BAGS : {info.get('Bags','')}\n\n"
                 "────────────────────\n"
                 f"⟪ IN  ⟫ {format_dt(info.get('TareDT',''))}\n"
                 f"⚖ Tare  : {info.get('TareKg','')} Kg\n"
                 f"⟪ OUT ⟫ {format_dt(info.get('GrossDT',''))}\n"
                 f"⚖ Gross : {info.get('GrossKg','')} Kg\n"
                 "────────────────────\n"
-                f"*🔵 NET LOAD : {info.get('NetKg','')} Kg*\n"
+                f"🔵 NET LOAD : {info.get('NetKg','')} Kg\n"
                 f"🟡 YARD TIME : {duration_text}\n"
-                f"{status_entry}\n"
-                f"{status_closed}"
+                "▣ ENTRY LOGGED\n"
+                "▣ LOAD SEALED & CLOSED"
             )
 
             send_telegram(msg_text)
