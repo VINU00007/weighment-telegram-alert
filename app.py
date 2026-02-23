@@ -17,7 +17,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-vehicle_log = {}
 completed_weighments = []
 last_hour_sent = None
 
@@ -69,9 +68,8 @@ def parse_dt(dt_str):
     return None
 
 
-def format_dt(dt_str):
-    dt_obj = parse_dt(dt_str)
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else dt_str
+def format_dt(dt_obj):
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
 
 
 # ================= PDF EXTRACTION =================
@@ -90,70 +88,127 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
         "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
         "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
         "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
-        "NetKg": pick(text, r"Net\.\s*:\s*(\d+)"),
         "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
         "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
     }
 
 
-# ================= ENTRY ALERT =================
-def send_entry_alert(info):
-    message = (
-        "⚖️  WEIGHMENT ENTRY  ⚖️\n\n"
-        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
-        f"👤 {info['Party']}\n"
-        f"📍 PLACE : {info['Place']}\n"
-        f"🌾 MATERIAL : {info['Material']}\n"
-        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-        f"⟪ IN ⟫ {format_dt(info['TareDT'])}\n"
-        f"⚖ Tare : {info['TareKg']} Kg\n\n"
-        "🟡 STATUS : VEHICLE ENTERED YARD"
-    )
-    send_telegram(message)
+# ================= MAIN WEIGHMENT LOGIC =================
+def process_weighment(info):
 
+    tare_exists = bool(info["TareKg"])
+    gross_exists = bool(info["GrossKg"])
 
-# ================= COMPLETION ALERT =================
-def send_completion_alert(info):
-    global completed_weighments
+    tare_dt = parse_dt(info["TareDT"]) if info["TareDT"] else None
+    gross_dt = parse_dt(info["GrossDT"]) if info["GrossDT"] else None
 
-    net_kg = int(info["NetKg"] or 0)
-    exit_dt_obj = parse_dt(info["GrossDT"])
-    tare_dt_obj = parse_dt(info["TareDT"])
+    # ---------- ENTRY STAGE ----------
+    if tare_exists and not gross_exists:
+        in_type = "Tare"
+        in_weight = info["TareKg"]
+        in_time = tare_dt
+        out_type = "Gross"
 
-    duration_text = "N/A"
-    if exit_dt_obj and tare_dt_obj:
-        diff = exit_dt_obj - tare_dt_obj
-        mins = int(diff.total_seconds() // 60)
-        duration_text = f"{mins // 60}h {mins % 60}m"
+        message = build_entry_message(info, in_type, in_weight, in_time, out_type)
+        send_telegram(message)
+        return
 
-    if exit_dt_obj:
+    if gross_exists and not tare_exists:
+        in_type = "Gross"
+        in_weight = info["GrossKg"]
+        in_time = gross_dt
+        out_type = "Tare"
+
+        message = build_entry_message(info, in_type, in_weight, in_time, out_type)
+        send_telegram(message)
+        return
+
+    # ---------- COMPLETION STAGE ----------
+    if tare_exists and gross_exists and tare_dt and gross_dt:
+
+        if tare_dt < gross_dt:
+            in_type = "Tare"
+            in_weight = info["TareKg"]
+            in_time = tare_dt
+
+            out_type = "Gross"
+            out_weight = info["GrossKg"]
+            out_time = gross_dt
+        else:
+            in_type = "Gross"
+            in_weight = info["GrossKg"]
+            in_time = gross_dt
+
+            out_type = "Tare"
+            out_weight = info["TareKg"]
+            out_time = tare_dt
+
+        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
+        duration = out_time - in_time
+        minutes = int(duration.total_seconds() // 60)
+        yard_time = f"{minutes // 60}h {minutes % 60}m"
+
         completed_weighments.append({
-            "time": exit_dt_obj,
-            "net": net_kg,
-            "material": info["Material"],
-            "high": net_kg > 20000
+            "time": out_time,
+            "net": net,
+            "material": info["Material"]
         })
 
-    message = (
-        "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
+        message = build_completion_message(
+            info,
+            in_type, in_weight, in_time,
+            out_type, out_weight, out_time,
+            net, yard_time
+        )
+
+        send_telegram(message)
+
+
+# ================= MESSAGE BUILDERS =================
+def build_entry_message(info, in_type, in_weight, in_time, out_type):
+
+    return (
+        "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
         f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
         f"👤 {info['Party']}\n"
         f"📍 PLACE : {info['Place']}\n"
         f"🌾 MATERIAL : {info['Material']}\n"
         f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-        f"⟪ OUT ⟫ {format_dt(info['GrossDT'])}\n"
-        f"⚖ Gross : {info['GrossKg']} Kg\n\n"
-        f"🔵 NET LOAD : {net_kg} Kg\n"
-        f"🟡 YARD TIME : {duration_text}\n"
-        "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
+        f"⟪ IN  ⟫ {format_dt(in_time)}\n"
+        f"⚖ {in_type}  : {in_weight} Kg\n\n"
+        f"⟪ OUT ⟫ Pending final weighment\n"
+        f"⚖ {out_type}  : Pending final weighment\n\n"
+        "🔵 NET LOAD : Pending final weighment\n"
+        "🟡 YARD TIME : Pending final weighment\n\n"
+        "🟡 STATUS : VEHICLE ENTERED YARD"
     )
 
-    send_telegram(message)
+
+def build_completion_message(info,
+                             in_type, in_weight, in_time,
+                             out_type, out_weight, out_time,
+                             net, yard_time):
+
+    return (
+        "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
+        f"👤 {info['Party']}\n"
+        f"📍 PLACE : {info['Place']}\n"
+        f"🌾 MATERIAL : {info['Material']}\n"
+        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+        f"⟪ IN  ⟫ {format_dt(in_time)}\n"
+        f"⚖ {in_type}  : {in_weight} Kg\n\n"
+        f"⟪ OUT ⟫ {format_dt(out_time)}\n"
+        f"⚖ {out_type}  : {out_weight} Kg\n\n"
+        f"🔵 NET LOAD : {net} Kg\n"
+        f"🟡 YARD TIME : {yard_time}\n\n"
+        "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
+    )
 
 
 # ================= HOURLY STATUS =================
 def send_hourly_status():
-    global completed_weighments, last_hour_sent
+    global last_hour_sent
 
     now = now_ist()
     one_hour_ago = now - timedelta(hours=1)
@@ -168,11 +223,9 @@ def send_hourly_status():
         )
     else:
         total_net = sum(w["net"] for w in recent)
-        total_loads = len(recent)
-
         message = (
             f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            f"Weighments Completed : {total_loads}\n"
+            f"Weighments Completed : {len(recent)}\n"
             f"Total Net This Hour  : {total_net:,} Kg"
         )
 
@@ -200,21 +253,11 @@ def check_mail():
             continue
 
         for part in msg.walk():
-            filename = part.get_filename()
-            content_type = part.get_content_type()
-
-            if (
-                (filename and filename.lower().endswith(".pdf"))
-                or content_type == "application/pdf"
-            ):
+            if part.get_content_type() == "application/pdf":
                 data = part.get_payload(decode=True)
                 if data:
                     info = extract_from_pdf_bytes(data)
-
-                    if info["GrossKg"]:
-                        send_completion_alert(info)
-                    else:
-                        send_entry_alert(info)
+                    process_weighment(info)
 
         mail.store(mail_id, "+FLAGS", "\\Seen")
 
