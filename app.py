@@ -3,7 +3,7 @@ import time
 import requests
 
 # ==========================================
-# 🔹 WHATSAPP CONFIGURATION
+# WHATSAPP CONFIG
 # ==========================================
 
 WHATSAPP_TOKEN = "EAAd3lLDpMAUBQ3qpb2fTnyxw7Rqh3esPikmuzGRZBzsllzRZBxZCfooRaRoXoh7jpBZBYJ5G4Yemil47AgVQIY5v4PX3wJZA1Gs445btkr82Va0j7NKCXNFKd8SUhVRmKZBLO5VsIkXVhaE7cz7ESaEJ9rwYkKYrsNoSXVjEqbHHBn3HrXYZAOzL9SPKtUdWAZDZD"
@@ -15,17 +15,17 @@ RECIPIENTS = [
 ]
 
 # ==========================================
-# 🔹 FOLDER TO WATCH (RAILWAY SAFE)
+# FOLDER CONFIG
 # ==========================================
 
 WATCH_FOLDER = "/app/weighment_slips"
 
-# Auto-create folder if not exists
+# Create folder if it doesn't exist
 if not os.path.exists(WATCH_FOLDER):
     os.makedirs(WATCH_FOLDER)
 
 # ==========================================
-# 🔹 SEND WHATSAPP MESSAGE FUNCTION
+# SEND WHATSAPP FUNCTION
 # ==========================================
 
 def send_whatsapp_message(message_text):
@@ -48,19 +48,17 @@ def send_whatsapp_message(message_text):
 
         try:
             response = requests.post(url, headers=headers, json=payload)
-
             print("To:", number)
             print("Status:", response.status_code)
             print("Response:", response.text)
             print("-" * 50)
-
         except Exception as e:
             print("Error sending to", number)
             print(str(e))
 
 
 # ==========================================
-# 🔹 MAIN FOLDER MONITOR FUNCTION
+# MONITOR FOLDER FUNCTION
 # ==========================================
 
 def monitor_folder():
@@ -83,8 +81,12 @@ def monitor_folder():
 
 
 # ==========================================
-# 🔹 START PROGRAM
+# START PROGRAM
 # ==========================================
 
 if __name__ == "__main__":
-    send_whatsapp_message("🔥 Live test from Railway container")
+    # Send one startup test message
+    send_whatsapp_message("🔥 WhatsApp automation is LIVE on Railway")
+
+    # Start folder monitoring
+    monitor_folder()
