@@ -15,13 +15,17 @@ RECIPIENTS = [
 ]
 
 # ==========================================
-# 🔹 FOLDER TO WATCH
+# 🔹 FOLDER TO WATCH (RAILWAY SAFE)
 # ==========================================
 
-WATCH_FOLDER = "/app/weighment_slips"   # Change if needed
+WATCH_FOLDER = "/app/weighment_slips"
+
+# Auto-create folder if not exists
+if not os.path.exists(WATCH_FOLDER):
+    os.makedirs(WATCH_FOLDER)
 
 # ==========================================
-# 🔹 SEND WHATSAPP MESSAGE
+# 🔹 SEND WHATSAPP MESSAGE FUNCTION
 # ==========================================
 
 def send_whatsapp_message(message_text):
@@ -42,16 +46,21 @@ def send_whatsapp_message(message_text):
             }
         }
 
-        response = requests.post(url, headers=headers, json=payload)
+        try:
+            response = requests.post(url, headers=headers, json=payload)
 
-        print("To:", number)
-        print("Status:", response.status_code)
-        print("Response:", response.text)
-        print("-" * 40)
+            print("To:", number)
+            print("Status:", response.status_code)
+            print("Response:", response.text)
+            print("-" * 50)
+
+        except Exception as e:
+            print("Error sending to", number)
+            print(str(e))
 
 
 # ==========================================
-# 🔹 MAIN MONITOR LOGIC
+# 🔹 MAIN FOLDER MONITOR FUNCTION
 # ==========================================
 
 def monitor_folder():
