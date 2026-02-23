@@ -181,10 +181,4 @@ def check_mail():
 
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
-    while True:
-        try:
-            check_mail()
-        except Exception as e:
-            print("Error:", e)
-
-        time.sleep(30)
+    send_whatsapp("🚀 Test message from weighment system")
