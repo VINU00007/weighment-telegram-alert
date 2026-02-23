@@ -30,14 +30,14 @@ def now_ist():
 # ================= TELEGRAM =================
 
 def send_whatsapp(message: str):
-    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v18.0/{1026390710554052}/messages"
 
     headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Authorization": f"Bearer {EAAd3lLDpMAUBQ3qpb2fTnyxw7Rqh3esPikmuzGRZBzsllzRZBxZCfooRaRoXoh7jpBZBYJ5G4Yemil47AgVQIY5v4PX3wJZA1Gs445btkr82Va0j7NKCXNFKd8SUhVRmKZBLO5VsIkXVhaE7cz7ESaEJ9rwYkKYrsNoSXVjEqbHHBn3HrXYZAOzL9SPKtUdWAZDZD}",
         "Content-Type": "application/json"
     }
 
-    for number in [MY_NUMBER, DAD_NUMBER]:
+    for number in [918181923999, 918181923999]:
         payload = {
             "messaging_product": "whatsapp",
             "to": number,
