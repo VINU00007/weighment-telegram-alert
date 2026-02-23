@@ -9,7 +9,7 @@ DAD_NUMBER = "919849399996"
 
 # ======= SEND TEMPLATE TEST =======
 def send_test():
-    url = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{1026390710554052}/messages"
 
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
