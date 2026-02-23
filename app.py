@@ -122,7 +122,7 @@ def send_entry_alert(info):
         f"⚖ Tare : {info['TareKg']} Kg\n\n"
         "🟡 STATUS : VEHICLE ENTERED YARD"
     )
-    send_telegram(message)
+    send_whatsapp(message)
 
 
 # ================= COMPLETION ALERT =================
@@ -162,7 +162,7 @@ def send_completion_alert(info):
         "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
     )
 
-    send_telegram(message)
+    send_whatsapp(message)
 
 
 # ================= HOURLY STATUS =================
@@ -190,7 +190,7 @@ def send_hourly_status():
             f"Total Net This Hour  : {total_net:,} Kg"
         )
 
-    send_telegram(message)
+    send_whatsapp(message)
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
