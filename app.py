@@ -17,7 +17,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-# ===== In-Memory Storage =====
 vehicle_log = {}
 completed_weighments = []
 last_hour_sent = None
@@ -33,11 +32,9 @@ def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
+        "text": message
     }
-    r = requests.post(url, data=payload, timeout=20)
-    r.raise_for_status()
+    requests.post(url, data=payload, timeout=20)
 
 
 # ================= HELPERS =================
@@ -99,8 +96,24 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     }
 
 
-# ================= PROCESS WEIGHMENT =================
-def process_weighment(info):
+# ================= PROCESS ENTRY =================
+def send_entry_alert(info):
+    message = (
+        "⚖️  WEIGHMENT ENTRY  ⚖️\n\n"
+        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
+        f"👤 {info['Party']}\n"
+        f"📍 PLACE : {info['Place']}\n"
+        f"🌾 MATERIAL : {info['Material']}\n"
+        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+        f"⟪ IN ⟫ {format_dt(info['TareDT'])}\n"
+        f"⚖ Tare : {info['TareKg']} Kg\n\n"
+        "🟡 STATUS : VEHICLE ENTERED YARD"
+    )
+    send_telegram(message)
+
+
+# ================= PROCESS COMPLETION =================
+def send_completion_alert(info):
     global vehicle_log, completed_weighments
 
     today_key = now_ist().strftime("%Y-%m-%d")
@@ -109,7 +122,6 @@ def process_weighment(info):
 
     vehicle = info["Vehicle"]
     net_kg = int(info["NetKg"] or 0)
-    material = info["Material"]
 
     exit_dt_obj = parse_dt(info["GrossDT"])
     tare_dt_obj = parse_dt(info["TareDT"])
@@ -128,30 +140,27 @@ def process_weighment(info):
         completed_weighments.append({
             "time": exit_dt_obj,
             "net": net_kg,
-            "material": material,
+            "material": info["Material"],
             "high": net_kg > 20000
         })
 
     message = (
-        "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+        "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
         f"🧾 RST : {info['RST']}   🚛 {vehicle}\n"
         f"👤 {info['Party']}\n"
         f"📍 PLACE : {info['Place']}\n"
-        f"🌾 MATERIAL : {material}\n"
-        f"📦 BAGS : {info['Bags']}\n\n"
-        f"⟪ IN  ⟫ {format_dt(info['TareDT'])}\n"
-        f"⚖ Tare  : {info['TareKg']} Kg\n"
+        f"🌾 MATERIAL : {info['Material']}\n"
+        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
         f"⟪ OUT ⟫ {format_dt(info['GrossDT'])}\n"
         f"⚖ Gross : {info['GrossKg']} Kg\n\n"
         f"🔵 NET LOAD : {net_kg} Kg\n"
         f"🟡 YARD TIME : {duration_text}\n"
         f"{high_load_flag}"
-        f"{repeat_flag}\n"
-        "*▣ ENTRY LOGGED*\n"
-        "*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
+        f"{repeat_flag}"
+        "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
     )
 
-    send_telegram(message.strip())
+    send_telegram(message)
 
 
 # ================= HOURLY STATUS =================
@@ -225,7 +234,11 @@ def check_mail():
                 data = part.get_payload(decode=True)
                 if data:
                     info = extract_from_pdf_bytes(data)
-                    process_weighment(info)
+
+                    if info["GrossKg"]:
+                        send_completion_alert(info)
+                    else:
+                        send_entry_alert(info)
 
         mail.store(mail_id, "+FLAGS", "\\Seen")
 
@@ -240,6 +253,7 @@ if __name__ == "__main__":
 
             if now.minute == 0:
                 hour_marker = now.strftime("%Y-%m-%d %H")
+                global last_hour_sent
                 if hour_marker != last_hour_sent:
                     send_hourly_status()
                     last_hour_sent = hour_marker
