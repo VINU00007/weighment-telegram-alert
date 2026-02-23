@@ -87,4 +87,4 @@ def monitor_folder():
 # ==========================================
 
 if __name__ == "__main__":
-    monitor_folder()
+    send_whatsapp_message("🔥 Live test from Railway container")
