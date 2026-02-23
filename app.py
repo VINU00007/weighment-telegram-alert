@@ -48,7 +48,9 @@ def send_whatsapp(message: str):
         }
 
         requests.post(url, headers=headers, json=payload, timeout=20)
-
+response = requests.post(url, headers=headers, json=payload, timeout=20)
+print("Status:", response.status_code)
+print("Response:", response.text)
 
 # ================= HELPERS =================
 def safe_decode(value):
