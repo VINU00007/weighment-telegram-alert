@@ -96,7 +96,7 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     }
 
 
-# ================= PROCESS ENTRY =================
+# ================= ENTRY ALERT =================
 def send_entry_alert(info):
     message = (
         "⚖️  WEIGHMENT ENTRY  ⚖️\n\n"
@@ -112,15 +112,10 @@ def send_entry_alert(info):
     send_telegram(message)
 
 
-# ================= PROCESS COMPLETION =================
+# ================= COMPLETION ALERT =================
 def send_completion_alert(info):
-    global vehicle_log, completed_weighments
+    global completed_weighments
 
-    today_key = now_ist().strftime("%Y-%m-%d")
-    if today_key not in vehicle_log:
-        vehicle_log[today_key] = set()
-
-    vehicle = info["Vehicle"]
     net_kg = int(info["NetKg"] or 0)
 
     exit_dt_obj = parse_dt(info["GrossDT"])
@@ -132,10 +127,6 @@ def send_completion_alert(info):
         mins = int(diff.total_seconds() // 60)
         duration_text = f"{mins // 60}h {mins % 60}m"
 
-    high_load_flag = "⬆ HIGH LOAD\n" if net_kg > 20000 else ""
-    repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[today_key] else ""
-    vehicle_log[today_key].add(vehicle)
-
     if exit_dt_obj:
         completed_weighments.append({
             "time": exit_dt_obj,
@@ -146,7 +137,7 @@ def send_completion_alert(info):
 
     message = (
         "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
-        f"🧾 RST : {info['RST']}   🚛 {vehicle}\n"
+        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
         f"👤 {info['Party']}\n"
         f"📍 PLACE : {info['Place']}\n"
         f"🌾 MATERIAL : {info['Material']}\n"
@@ -155,8 +146,6 @@ def send_completion_alert(info):
         f"⚖ Gross : {info['GrossKg']} Kg\n\n"
         f"🔵 NET LOAD : {net_kg} Kg\n"
         f"🟡 YARD TIME : {duration_text}\n"
-        f"{high_load_flag}"
-        f"{repeat_flag}"
         "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
     )
 
@@ -165,7 +154,7 @@ def send_completion_alert(info):
 
 # ================= HOURLY STATUS =================
 def send_hourly_status():
-    global completed_weighments
+    global completed_weighments, last_hour_sent
 
     now = now_ist()
     one_hour_ago = now - timedelta(hours=1)
@@ -178,30 +167,18 @@ def send_hourly_status():
             f"⏱ HOURLY STATUS – {hour_label}\n\n"
             "No Weighments Completed In The Past Hour."
         )
-        send_telegram(message)
-        return
+    else:
+        total_net = sum(w["net"] for w in recent)
+        total_loads = len(recent)
 
-    total_net = sum(w["net"] for w in recent)
-    total_loads = len(recent)
-    high_count = sum(1 for w in recent if w["high"])
-
-    material_totals = {}
-    for w in recent:
-        material_totals[w["material"]] = material_totals.get(w["material"], 0) + w["net"]
-
-    material_lines = "\n".join(
-        f"{m} : {material_totals[m]:,} Kg" for m in material_totals
-    )
-
-    message = (
-        f"⏱ HOURLY STATUS – {hour_label}\n\n"
-        f"Weighments Completed : {total_loads}\n"
-        f"Total Net This Hour  : {total_net:,} Kg\n\n"
-        f"{material_lines}\n\n"
-        f"⬆ High Loads : {high_count}"
-    )
+        message = (
+            f"⏱ HOURLY STATUS – {hour_label}\n\n"
+            f"Weighments Completed : {total_loads}\n"
+            f"Total Net This Hour  : {total_net:,} Kg"
+        )
 
     send_telegram(message)
+    last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
 # ================= EMAIL CHECK =================
@@ -250,13 +227,10 @@ if __name__ == "__main__":
     while True:
         try:
             now = now_ist()
+            hour_marker = now.strftime("%Y-%m-%d %H")
 
-            if now.minute == 0:
-                hour_marker = now.strftime("%Y-%m-%d %H")
-                global last_hour_sent
-                if hour_marker != last_hour_sent:
-                    send_hourly_status()
-                    last_hour_sent = hour_marker
+            if now.minute == 0 and hour_marker != last_hour_sent:
+                send_hourly_status()
 
             check_mail()
 
