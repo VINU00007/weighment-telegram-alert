@@ -124,7 +124,7 @@ def send_entry_alert(info):
     )
     send_whatsapp(message)
     if __name__ == "__main__":
-    send_whatsapp("Test message from weighment system")
+        send_whatsapp("Test message from weighment system")
 
 
 # ================= COMPLETION ALERT =================
