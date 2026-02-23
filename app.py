@@ -18,8 +18,9 @@ IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
 completed_weighments = []
-pending_yard = {}   # {RST: {details}}
+pending_yard = {}
 last_hour_sent = None
+last_weekly_sent = None
 
 
 # ================= TIME (IST) =================
@@ -27,13 +28,14 @@ def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 
+def format_dt(dt_obj):
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
+
+
 # ================= TELEGRAM =================
 def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    payload = {"chat_id": CHAT_ID, "text": message}
     requests.post(url, data=payload, timeout=20)
 
 
@@ -67,10 +69,6 @@ def parse_dt(dt_str):
         except:
             continue
     return None
-
-
-def format_dt(dt_obj):
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
 
 
 # ================= PDF EXTRACTION =================
@@ -134,8 +132,8 @@ def build_completion_message(info,
     )
 
 
-# ================= MAIN WEIGHMENT LOGIC =================
-def process_weighment(info):
+# ================= PROCESS WEIGHMENT =================
+def process_weighment(info, silent=False):
 
     tare_exists = bool(info["TareKg"])
     gross_exists = bool(info["GrossKg"])
@@ -158,7 +156,8 @@ def process_weighment(info):
             "InTime": in_time
         }
 
-        send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
+        if not silent:
+            send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
         return
 
     if gross_exists and not tare_exists:
@@ -173,7 +172,8 @@ def process_weighment(info):
             "InTime": in_time
         }
 
-        send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
+        if not silent:
+            send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
         return
 
     # COMPLETION
@@ -200,11 +200,12 @@ def process_weighment(info):
         if rst in pending_yard:
             del pending_yard[rst]
 
-        send_telegram(build_completion_message(
-            info, in_type, in_weight, in_time,
-            out_type, out_weight, out_time,
-            net, yard_time
-        ))
+        if not silent:
+            send_telegram(build_completion_message(
+                info, in_type, in_weight, in_time,
+                out_type, out_weight, out_time,
+                net, yard_time
+            ))
 
 
 # ================= HOURLY STATUS =================
@@ -220,9 +221,7 @@ def send_hourly_status():
     message = f"⏱ HOURLY STATUS – {hour_label}\n\n"
 
     if recent:
-        total_net = sum(w["net"] for w in recent)
-        message += f"✅ Completed : {len(recent)}\n"
-        message += f"Total Net     : {total_net:,} Kg\n\n"
+        message += f"✅ Completed : {len(recent)}\n\n"
 
         material_totals = {}
         for w in recent:
@@ -235,9 +234,16 @@ def send_hourly_status():
     else:
         message += "No Completed Weighments In The Past Hour.\n\n"
 
-    if pending_yard:
-        message += f"🟡 Vehicles Currently Inside Yard : {len(pending_yard)}\n\n"
-        for rst, details in pending_yard.items():
+    # Ignore pending older than 10 days
+    valid_pending = {}
+    for rst, details in pending_yard.items():
+        entry_time = details["InTime"]
+        if entry_time and (now - entry_time).days <= 10:
+            valid_pending[rst] = details
+
+    if valid_pending:
+        message += f"🟡 Vehicles Currently Inside Yard : {len(valid_pending)}\n\n"
+        for rst, details in valid_pending.items():
             message += (
                 f"• RST {rst}  |  {details['Party']}\n"
                 f"  {details['Material']}\n"
@@ -250,7 +256,80 @@ def send_hourly_status():
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
-# ================= EMAIL CHECK =================
+# ================= WEEKLY SUMMARY =================
+def send_weekly_summary():
+    global last_weekly_sent
+
+    now = now_ist()
+
+    if now.weekday() != 0 or not (now.hour == 10 and now.minute == 15):
+        return
+
+    week_id = now.strftime("%Y-%m-%d")
+    if week_id == last_weekly_sent:
+        return
+
+    last_monday = now - timedelta(days=7)
+    start = last_monday - timedelta(days=last_monday.weekday())
+    end = start + timedelta(days=6)
+
+    weekly_data = [
+        w for w in completed_weighments
+        if start.date() <= w["time"].date() <= end.date()
+    ]
+
+    message = (
+        f"📅 WEEKLY SUMMARY REPORT\n"
+        f"({start.strftime('%d-%b-%y')} to {end.strftime('%d-%b-%y')})\n\n"
+        f"Total Completed Weighments : {len(weekly_data)}\n\n"
+    )
+
+    material_totals = {}
+    for w in weekly_data:
+        material_totals[w["material"]] = material_totals.get(w["material"], 0) + w["net"]
+
+    for mat, weight in material_totals.items():
+        message += f"🌾 {mat} : {weight:,} Kg\n"
+
+    message += "\nYard Status:\n"
+    message += f"Completed : {len(weekly_data)}\n"
+    message += f"Pending   : {len(pending_yard)}\n"
+
+    send_telegram(message)
+    last_weekly_sent = week_id
+
+
+# ================= REBUILD (15 DAYS) =================
+def rebuild_last_15_days():
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("inbox")
+
+    since_date = (now_ist() - timedelta(days=15)).strftime("%d-%b-%Y")
+    status, messages = mail.search(None, f'(SINCE "{since_date}")')
+
+    mail_ids = messages[0].split()
+
+    for mail_id in mail_ids:
+        status, msg_data = mail.fetch(mail_id, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+
+        subject = safe_decode(msg.get("Subject"))
+        if not any(k in subject.upper() for k in KEYWORDS):
+            continue
+
+        for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
+                data = part.get_payload(decode=True)
+                if data:
+                    info = extract_from_pdf_bytes(data)
+                    process_weighment(info, silent=True)
+
+    mail.logout()
+
+
+# ================= CHECK MAIL (LIVE) =================
 def check_mail():
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
@@ -281,8 +360,10 @@ def check_mail():
     mail.logout()
 
 
-# ================= MAIN LOOP =================
+# ================= MAIN =================
 if __name__ == "__main__":
+    rebuild_last_15_days()
+
     while True:
         try:
             now = now_ist()
@@ -291,6 +372,7 @@ if __name__ == "__main__":
             if now.minute == 0 and hour_marker != last_hour_sent:
                 send_hourly_status()
 
+            send_weekly_summary()
             check_mail()
 
         except Exception as e:
