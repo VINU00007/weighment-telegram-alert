@@ -18,6 +18,7 @@ IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
 completed_weighments = []
+pending_yard = {}   # {RST: {details}}
 last_hour_sent = None
 
 
@@ -93,80 +94,8 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     }
 
 
-# ================= MAIN WEIGHMENT LOGIC =================
-def process_weighment(info):
-
-    tare_exists = bool(info["TareKg"])
-    gross_exists = bool(info["GrossKg"])
-
-    tare_dt = parse_dt(info["TareDT"]) if info["TareDT"] else None
-    gross_dt = parse_dt(info["GrossDT"]) if info["GrossDT"] else None
-
-    # ---------- ENTRY STAGE ----------
-    if tare_exists and not gross_exists:
-        in_type = "Tare"
-        in_weight = info["TareKg"]
-        in_time = tare_dt
-        out_type = "Gross"
-
-        message = build_entry_message(info, in_type, in_weight, in_time, out_type)
-        send_telegram(message)
-        return
-
-    if gross_exists and not tare_exists:
-        in_type = "Gross"
-        in_weight = info["GrossKg"]
-        in_time = gross_dt
-        out_type = "Tare"
-
-        message = build_entry_message(info, in_type, in_weight, in_time, out_type)
-        send_telegram(message)
-        return
-
-    # ---------- COMPLETION STAGE ----------
-    if tare_exists and gross_exists and tare_dt and gross_dt:
-
-        if tare_dt < gross_dt:
-            in_type = "Tare"
-            in_weight = info["TareKg"]
-            in_time = tare_dt
-
-            out_type = "Gross"
-            out_weight = info["GrossKg"]
-            out_time = gross_dt
-        else:
-            in_type = "Gross"
-            in_weight = info["GrossKg"]
-            in_time = gross_dt
-
-            out_type = "Tare"
-            out_weight = info["TareKg"]
-            out_time = tare_dt
-
-        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
-        duration = out_time - in_time
-        minutes = int(duration.total_seconds() // 60)
-        yard_time = f"{minutes // 60}h {minutes % 60}m"
-
-        completed_weighments.append({
-            "time": out_time,
-            "net": net,
-            "material": info["Material"]
-        })
-
-        message = build_completion_message(
-            info,
-            in_type, in_weight, in_time,
-            out_type, out_weight, out_time,
-            net, yard_time
-        )
-
-        send_telegram(message)
-
-
 # ================= MESSAGE BUILDERS =================
 def build_entry_message(info, in_type, in_weight, in_time, out_type):
-
     return (
         "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
         f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
@@ -188,7 +117,6 @@ def build_completion_message(info,
                              in_type, in_weight, in_time,
                              out_type, out_weight, out_time,
                              net, yard_time):
-
     return (
         "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
         f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
@@ -206,6 +134,79 @@ def build_completion_message(info,
     )
 
 
+# ================= MAIN WEIGHMENT LOGIC =================
+def process_weighment(info):
+
+    tare_exists = bool(info["TareKg"])
+    gross_exists = bool(info["GrossKg"])
+
+    tare_dt = parse_dt(info["TareDT"]) if info["TareDT"] else None
+    gross_dt = parse_dt(info["GrossDT"]) if info["GrossDT"] else None
+
+    rst = info["RST"]
+
+    # ENTRY
+    if tare_exists and not gross_exists:
+        in_type = "Tare"
+        in_weight = info["TareKg"]
+        in_time = tare_dt
+        out_type = "Gross"
+
+        pending_yard[rst] = {
+            "Party": info["Party"],
+            "Material": info["Material"],
+            "InTime": in_time
+        }
+
+        send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
+        return
+
+    if gross_exists and not tare_exists:
+        in_type = "Gross"
+        in_weight = info["GrossKg"]
+        in_time = gross_dt
+        out_type = "Tare"
+
+        pending_yard[rst] = {
+            "Party": info["Party"],
+            "Material": info["Material"],
+            "InTime": in_time
+        }
+
+        send_telegram(build_entry_message(info, in_type, in_weight, in_time, out_type))
+        return
+
+    # COMPLETION
+    if tare_exists and gross_exists and tare_dt and gross_dt:
+
+        if tare_dt < gross_dt:
+            in_type, in_weight, in_time = "Tare", info["TareKg"], tare_dt
+            out_type, out_weight, out_time = "Gross", info["GrossKg"], gross_dt
+        else:
+            in_type, in_weight, in_time = "Gross", info["GrossKg"], gross_dt
+            out_type, out_weight, out_time = "Tare", info["TareKg"], tare_dt
+
+        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
+        duration = out_time - in_time
+        minutes = int(duration.total_seconds() // 60)
+        yard_time = f"{minutes // 60}h {minutes % 60}m"
+
+        completed_weighments.append({
+            "time": out_time,
+            "net": net,
+            "material": info["Material"]
+        })
+
+        if rst in pending_yard:
+            del pending_yard[rst]
+
+        send_telegram(build_completion_message(
+            info, in_type, in_weight, in_time,
+            out_type, out_weight, out_time,
+            net, yard_time
+        ))
+
+
 # ================= HOURLY STATUS =================
 def send_hourly_status():
     global last_hour_sent
@@ -216,18 +217,34 @@ def send_hourly_status():
 
     recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
 
-    if not recent:
-        message = (
-            f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            "No Weighments Completed In The Past Hour."
-        )
-    else:
+    message = f"⏱ HOURLY STATUS – {hour_label}\n\n"
+
+    if recent:
         total_net = sum(w["net"] for w in recent)
-        message = (
-            f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            f"Weighments Completed : {len(recent)}\n"
-            f"Total Net This Hour  : {total_net:,} Kg"
-        )
+        message += f"✅ Completed : {len(recent)}\n"
+        message += f"Total Net     : {total_net:,} Kg\n\n"
+
+        material_totals = {}
+        for w in recent:
+            material_totals[w["material"]] = material_totals.get(w["material"], 0) + w["net"]
+
+        for mat, weight in material_totals.items():
+            message += f"🌾 {mat} : {weight:,} Kg\n"
+
+        message += "\n"
+    else:
+        message += "No Completed Weighments In The Past Hour.\n\n"
+
+    if pending_yard:
+        message += f"🟡 Vehicles Currently Inside Yard : {len(pending_yard)}\n\n"
+        for rst, details in pending_yard.items():
+            message += (
+                f"• RST {rst}  |  {details['Party']}\n"
+                f"  {details['Material']}\n"
+                f"  IN : {format_dt(details['InTime'])}\n\n"
+            )
+    else:
+        message += "Yard Is Clear.\n"
 
     send_telegram(message)
     last_hour_sent = now.strftime("%Y-%m-%d %H")
