@@ -123,6 +123,8 @@ def send_entry_alert(info):
         "🟡 STATUS : VEHICLE ENTERED YARD"
     )
     send_whatsapp(message)
+    if __name__ == "__main__":
+    send_whatsapp("Test message from weighment system")
 
 
 # ================= COMPLETION ALERT =================
