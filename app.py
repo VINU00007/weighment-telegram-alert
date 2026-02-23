@@ -28,13 +28,26 @@ def now_ist():
 
 
 # ================= TELEGRAM =================
-def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
+
+def send_whatsapp(message: str):
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json"
     }
-    requests.post(url, data=payload, timeout=20)
+
+    for number in [MY_NUMBER, DAD_NUMBER]:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": number,
+            "type": "text",
+            "text": {
+                "body": message
+            }
+        }
+
+        requests.post(url, headers=headers, json=payload, timeout=20)
 
 
 # ================= HELPERS =================
