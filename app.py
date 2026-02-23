@@ -1,22 +1,30 @@
+import os
+import time
 import requests
 
-# ==============================
-# 🔹 YOUR FIXED CONFIG
-# ==============================
+# ==========================================
+# 🔹 WHATSAPP CONFIGURATION
+# ==========================================
 
 WHATSAPP_TOKEN = "EAAd3lLDpMAUBQ3qpb2fTnyxw7Rqh3esPikmuzGRZBzsllzRZBxZCfooRaRoXoh7jpBZBYJ5G4Yemil47AgVQIY5v4PX3wJZA1Gs445btkr82Va0j7NKCXNFKd8SUhVRmKZBLO5VsIkXVhaE7cz7ESaEJ9rwYkKYrsNoSXVjEqbHHBn3HrXYZAOzL9SPKtUdWAZDZD"
 PHONE_NUMBER_ID = "1026390710554052"
 
-NUMBERS = [
+RECIPIENTS = [
     "918181923999",
     "919849399996"
 ]
 
-# ==============================
-# 🔹 SEND FUNCTION
-# ==============================
+# ==========================================
+# 🔹 FOLDER TO WATCH
+# ==========================================
 
-def send_whatsapp(to_number, message_text):
+WATCH_FOLDER = "/app/weighment_slips"   # Change if needed
+
+# ==========================================
+# 🔹 SEND WHATSAPP MESSAGE
+# ==========================================
+
+def send_whatsapp_message(message_text):
     url = f"https://graph.facebook.com/v22.0/{PHONE_NUMBER_ID}/messages"
 
     headers = {
@@ -24,27 +32,50 @@ def send_whatsapp(to_number, message_text):
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_number,
-        "type": "text",
-        "text": {
-            "body": message_text
+    for number in RECIPIENTS:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": number,
+            "type": "text",
+            "text": {
+                "body": message_text
+            }
         }
-    }
 
-    response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload)
 
-    print("To:", to_number)
-    print("Status:", response.status_code)
-    print("Response:", response.text)
-    print("-" * 50)
+        print("To:", number)
+        print("Status:", response.status_code)
+        print("Response:", response.text)
+        print("-" * 40)
 
 
-# ==============================
-# 🔹 TEST MESSAGE
-# ==============================
+# ==========================================
+# 🔹 MAIN MONITOR LOGIC
+# ==========================================
+
+def monitor_folder():
+    print("🚀 Weighment WhatsApp Automation Started...")
+    print("Watching folder:", WATCH_FOLDER)
+
+    already_seen = set(os.listdir(WATCH_FOLDER))
+
+    while True:
+        time.sleep(5)
+
+        current_files = set(os.listdir(WATCH_FOLDER))
+        new_files = current_files - already_seen
+
+        for file in new_files:
+            message = f"📄 New Weighment Slip Detected:\n{file}"
+            send_whatsapp_message(message)
+
+        already_seen = current_files
+
+
+# ==========================================
+# 🔹 START PROGRAM
+# ==========================================
 
 if __name__ == "__main__":
-    for number in NUMBERS:
-        send_whatsapp(number, "🔥 WhatsApp automation is working!")
+    monitor_folder()
