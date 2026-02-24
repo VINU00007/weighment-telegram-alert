@@ -17,31 +17,24 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
+vehicle_log = {}
 completed_weighments = []
-pending_yard = {}
 last_hour_sent = None
-last_uid_processed = None
 
 
-# ================= TIME =================
+# ================= TIME (IST) =================
 def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 
-def format_dt(dt_obj):
-    if not dt_obj:
-        return "Time Not Captured"
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
-
-
 # ================= TELEGRAM =================
 def send_telegram(message: str):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": message}
-        requests.post(url, data=payload, timeout=20)
-    except Exception as e:
-        print("Telegram Error:", e)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message
+    }
+    requests.post(url, data=payload, timeout=20)
 
 
 # ================= HELPERS =================
@@ -68,14 +61,17 @@ def normalize_text(s: str) -> str:
 
 
 def parse_dt(dt_str):
-    if not dt_str:
-        return None
     for fmt in ("%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"):
         try:
             return datetime.strptime(dt_str, fmt)
         except:
             continue
     return None
+
+
+def format_dt(dt_str):
+    dt_obj = parse_dt(dt_str)
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else dt_str
 
 
 # ================= PDF EXTRACTION =================
@@ -94,157 +90,150 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
         "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
         "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
         "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
+        "NetKg": pick(text, r"Net\.\s*:\s*(\d+)"),
         "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
         "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
     }
 
 
-# ================= PROCESS WEIGHMENT =================
-def process_weighment(info):
-    rst = info["RST"]
-    if not rst:
-        return
+# ================= ENTRY ALERT =================
+def send_entry_alert(info):
+    message = (
+        "⚖️  WEIGHMENT ENTRY  ⚖️\n\n"
+        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
+        f"👤 {info['Party']}\n"
+        f"📍 PLACE : {info['Place']}\n"
+        f"🌾 MATERIAL : {info['Material']}\n"
+        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+        f"⟪ IN ⟫ {format_dt(info['TareDT'])}\n"
+        f"⚖ Tare : {info['TareKg']} Kg\n\n"
+        "🟡 STATUS : VEHICLE ENTERED YARD"
+    )
+    send_telegram(message)
 
-    tare_exists = bool(info["TareKg"])
-    gross_exists = bool(info["GrossKg"])
 
-    tare_dt = parse_dt(info["TareDT"])
-    gross_dt = parse_dt(info["GrossDT"])
+# ================= COMPLETION ALERT =================
+def send_completion_alert(info):
+    global completed_weighments
 
-    # ENTRY
-    if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
-        in_type = "Tare" if tare_exists else "Gross"
-        in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
-        in_time = tare_dt if tare_exists else gross_dt
-        out_type = "Gross" if tare_exists else "Tare"
+    net_kg = int(info["NetKg"] or 0)
+    exit_dt_obj = parse_dt(info["GrossDT"])
+    tare_dt_obj = parse_dt(info["TareDT"])
 
-        pending_yard[rst] = {
-            "Vehicle": info["Vehicle"],
-            "Material": info["Material"],
-            "InTime": in_time or now_ist()
-        }
+    duration_text = "N/A"
+    if exit_dt_obj and tare_dt_obj:
+        diff = exit_dt_obj - tare_dt_obj
+        mins = int(diff.total_seconds() // 60)
+        duration_text = f"{mins // 60}h {mins % 60}m"
 
-        message = (
-            "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-            f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n\n"
-            f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⚖ {in_type} : {in_weight} Kg\n\n"
-            f"⟪ OUT ⟫ Pending final weighment\n"
-            f"⚖ {out_type} : Pending final weighment\n\n"
-            "🟡 STATUS : VEHICLE ENTERED YARD"
-        )
-        send_telegram(message)
-        return
-
-    # COMPLETION
-    if tare_exists and gross_exists and tare_dt and gross_dt:
-        in_time = min(tare_dt, gross_dt)
-        out_time = max(tare_dt, gross_dt)
-        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
-
+    if exit_dt_obj:
         completed_weighments.append({
-            "time": out_time,
-            "net": net,
-            "material": info["Material"]
+            "time": exit_dt_obj,
+            "net": net_kg,
+            "material": info["Material"],
+            "high": net_kg > 20000
         })
 
-        if rst in pending_yard:
-            del pending_yard[rst]
+    message = (
+        "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
+        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
+        f"👤 {info['Party']}\n"
+        f"📍 PLACE : {info['Place']}\n"
+        f"🌾 MATERIAL : {info['Material']}\n"
+        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+        f"⟪ OUT ⟫ {format_dt(info['GrossDT'])}\n"
+        f"⚖ Gross : {info['GrossKg']} Kg\n\n"
+        f"🔵 NET LOAD : {net_kg} Kg\n"
+        f"🟡 YARD TIME : {duration_text}\n"
+        "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
+    )
 
-        message = (
-            "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-            f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n\n"
-            f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⟪ OUT ⟫ {format_dt(out_time)}\n\n"
-            f"🔵 NET LOAD : {net} Kg\n\n"
-            "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
-        )
-        send_telegram(message)
-
-
-# ================= CHECK MAIL USING UID =================
-def check_mail():
-    global last_uid_processed
-
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL_USER, EMAIL_PASS)
-    mail.select("inbox")
-
-    result, data = mail.uid("search", None, "ALL")
-    uids = data[0].split()
-
-    if not uids:
-        mail.logout()
-        return
-
-    if last_uid_processed is None:
-        last_uid_processed = uids[-1]
-        mail.logout()
-        return
-
-    new_uids = [uid for uid in uids if int(uid) > int(last_uid_processed)]
-
-    for uid in new_uids:
-        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-
-        subject = safe_decode(msg.get("Subject"))
-        if not any(k in subject.upper() for k in KEYWORDS):
-            continue
-
-        for part in msg.walk():
-            if part.get_content_type() == "application/pdf":
-                data = part.get_payload(decode=True)
-                if data:
-                    info = extract_from_pdf_bytes(data)
-                    process_weighment(info)
-
-        last_uid_processed = uid
-
-    mail.logout()
+    send_telegram(message)
 
 
-# ================= HOURLY =================
+# ================= HOURLY STATUS =================
 def send_hourly_status():
-    global last_hour_sent
+    global completed_weighments, last_hour_sent
+
     now = now_ist()
     one_hour_ago = now - timedelta(hours=1)
     hour_label = now.strftime("%I %p").lstrip("0")
 
     recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
 
-    message = f"⏱ HOURLY STATUS – {hour_label}\n\n"
-
-    if recent:
-        message += f"✅ Completed : {len(recent)}\n"
+    if not recent:
+        message = (
+            f"⏱ HOURLY STATUS – {hour_label}\n\n"
+            "No Weighments Completed In The Past Hour."
+        )
     else:
-        message += "No Completed Weighments In The Past Hour.\n"
+        total_net = sum(w["net"] for w in recent)
+        total_loads = len(recent)
 
-    if pending_yard:
-        message += f"\n🟡 Vehicles Inside Yard : {len(pending_yard)}\n"
-    else:
-        message += "\nYard Is Clear.\n"
+        message = (
+            f"⏱ HOURLY STATUS – {hour_label}\n\n"
+            f"Weighments Completed : {total_loads}\n"
+            f"Total Net This Hour  : {total_net:,} Kg"
+        )
 
     send_telegram(message)
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
-# ================= MAIN =================
+# ================= EMAIL CHECK =================
+def check_mail():
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("inbox")
+
+    status, messages = mail.search(None, "(UNSEEN)")
+    mail_ids = messages[0].split()
+
+    for mail_id in mail_ids:
+        status, msg_data = mail.fetch(mail_id, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+
+        subject = safe_decode(msg.get("Subject"))
+        if not any(k in subject.upper() for k in KEYWORDS):
+            mail.store(mail_id, "+FLAGS", "\\Seen")
+            continue
+
+        for part in msg.walk():
+            filename = part.get_filename()
+            content_type = part.get_content_type()
+
+            if (
+                (filename and filename.lower().endswith(".pdf"))
+                or content_type == "application/pdf"
+            ):
+                data = part.get_payload(decode=True)
+                if data:
+                    info = extract_from_pdf_bytes(data)
+
+                    if info["GrossKg"]:
+                        send_completion_alert(info)
+                    else:
+                        send_entry_alert(info)
+
+        mail.store(mail_id, "+FLAGS", "\\Seen")
+
+    mail.logout()
+
+
+# ================= MAIN LOOP =================
 if __name__ == "__main__":
     while True:
         try:
             now = now_ist()
             hour_marker = now.strftime("%Y-%m-%d %H")
 
-            check_mail()
-
             if now.minute == 0 and hour_marker != last_hour_sent:
                 send_hourly_status()
 
+            check_mail()
+
         except Exception as e:
-            print("Main Error:", e)
+            print("Error:", e)
 
         time.sleep(30)
