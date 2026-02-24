@@ -9,20 +9,21 @@ from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
 
+# ================= CONFIG =================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-vehicle_log = {}
 completed_weighments = []
 last_hour_sent = None
 
 
-# ================= TIME (IST) =================
+# ================= TIME =================
 def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
@@ -71,7 +72,7 @@ def parse_dt(dt_str):
 
 def format_dt(dt_str):
     dt_obj = parse_dt(dt_str)
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else dt_str
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p") if dt_obj else ""
 
 
 # ================= PDF EXTRACTION =================
@@ -104,35 +105,30 @@ def send_entry_alert(info):
         f"👤 {info['Party']}\n"
         f"📍 PLACE : {info['Place']}\n"
         f"🌾 MATERIAL : {info['Material']}\n"
-        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-        f"⟪ IN ⟫ {format_dt(info['TareDT'])}\n"
-        f"⚖ Tare : {info['TareKg']} Kg\n\n"
+        f"📦 BAGS : {info['Bags'] or ''}\n\n"
+        f"🕒 Tare Time   : {format_dt(info['TareDT'])}\n"
+        f"⚖ Tare Weight : {info['TareKg'] or ''} Kg\n\n"
+        f"🕒 Gross Time  : {format_dt(info['GrossDT'])}\n"
+        f"⚖ Gross Weight: {info['GrossKg'] or ''} Kg\n\n"
+        f"🔵 NET LOAD     : {info['NetKg'] or ''} Kg\n\n"
         "🟡 STATUS : VEHICLE ENTERED YARD"
     )
+
     send_telegram(message)
 
 
 # ================= COMPLETION ALERT =================
 def send_completion_alert(info):
-    global completed_weighments
-
     net_kg = int(info["NetKg"] or 0)
-    exit_dt_obj = parse_dt(info["GrossDT"])
-    tare_dt_obj = parse_dt(info["TareDT"])
 
-    duration_text = "N/A"
-    if exit_dt_obj and tare_dt_obj:
-        diff = exit_dt_obj - tare_dt_obj
+    tare_dt_obj = parse_dt(info["TareDT"])
+    gross_dt_obj = parse_dt(info["GrossDT"])
+
+    duration_text = ""
+    if tare_dt_obj and gross_dt_obj:
+        diff = gross_dt_obj - tare_dt_obj
         mins = int(diff.total_seconds() // 60)
         duration_text = f"{mins // 60}h {mins % 60}m"
-
-    if exit_dt_obj:
-        completed_weighments.append({
-            "time": exit_dt_obj,
-            "net": net_kg,
-            "material": info["Material"],
-            "high": net_kg > 20000
-        })
 
     message = (
         "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
@@ -140,44 +136,17 @@ def send_completion_alert(info):
         f"👤 {info['Party']}\n"
         f"📍 PLACE : {info['Place']}\n"
         f"🌾 MATERIAL : {info['Material']}\n"
-        f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-        f"⟪ OUT ⟫ {format_dt(info['GrossDT'])}\n"
-        f"⚖ Gross : {info['GrossKg']} Kg\n\n"
-        f"🔵 NET LOAD : {net_kg} Kg\n"
-        f"🟡 YARD TIME : {duration_text}\n"
+        f"📦 BAGS : {info['Bags'] or ''}\n\n"
+        f"🕒 Tare Time   : {format_dt(info['TareDT'])}\n"
+        f"⚖ Tare Weight : {info['TareKg']} Kg\n\n"
+        f"🕒 Gross Time  : {format_dt(info['GrossDT'])}\n"
+        f"⚖ Gross Weight: {info['GrossKg']} Kg\n\n"
+        f"🔵 NET LOAD     : {net_kg} Kg\n"
+        f"🟡 YARD TIME    : {duration_text}\n\n"
         "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
     )
 
     send_telegram(message)
-
-
-# ================= HOURLY STATUS =================
-def send_hourly_status():
-    global completed_weighments, last_hour_sent
-
-    now = now_ist()
-    one_hour_ago = now - timedelta(hours=1)
-    hour_label = now.strftime("%I %p").lstrip("0")
-
-    recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
-
-    if not recent:
-        message = (
-            f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            "No Weighments Completed In The Past Hour."
-        )
-    else:
-        total_net = sum(w["net"] for w in recent)
-        total_loads = len(recent)
-
-        message = (
-            f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            f"Weighments Completed : {total_loads}\n"
-            f"Total Net This Hour  : {total_net:,} Kg"
-        )
-
-    send_telegram(message)
-    last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
 # ================= EMAIL CHECK =================
@@ -200,13 +169,7 @@ def check_mail():
             continue
 
         for part in msg.walk():
-            filename = part.get_filename()
-            content_type = part.get_content_type()
-
-            if (
-                (filename and filename.lower().endswith(".pdf"))
-                or content_type == "application/pdf"
-            ):
+            if part.get_content_type() == "application/pdf":
                 data = part.get_payload(decode=True)
                 if data:
                     info = extract_from_pdf_bytes(data)
@@ -225,14 +188,7 @@ def check_mail():
 if __name__ == "__main__":
     while True:
         try:
-            now = now_ist()
-            hour_marker = now.strftime("%Y-%m-%d %H")
-
-            if now.minute == 0 and hour_marker != last_hour_sent:
-                send_hourly_status()
-
             check_mail()
-
         except Exception as e:
             print("Error:", e)
 
