@@ -20,7 +20,6 @@ KEYWORDS = ["WEIGHMENT"]
 completed_weighments = []
 pending_yard = {}  # KEY = RST
 last_hour_sent = None
-last_weekly_sent = None
 
 
 # ================= TIME =================
@@ -101,7 +100,7 @@ def process_weighment(info, silent=False):
     tare_dt = parse_dt(info["TareDT"]) if info["TareDT"] else None
     gross_dt = parse_dt(info["GrossDT"]) if info["GrossDT"] else None
 
-    # ENTRY
+    # ENTRY (single weight)
     if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
 
         in_type = "Tare" if tare_exists else "Gross"
@@ -138,10 +137,8 @@ def process_weighment(info, silent=False):
     # COMPLETION
     if tare_exists and gross_exists and tare_dt and gross_dt:
 
-        if tare_dt < gross_dt:
-            in_time, out_time = tare_dt, gross_dt
-        else:
-            in_time, out_time = gross_dt, tare_dt
+        in_time = min(tare_dt, gross_dt)
+        out_time = max(tare_dt, gross_dt)
 
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
         duration = out_time - in_time
@@ -249,6 +246,37 @@ def rebuild_last_15_days():
     mail.logout()
 
 
+# ================= LIVE MAIL CHECK =================
+def check_mail():
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("inbox")
+
+    status, messages = mail.search(None, "(UNSEEN)")
+    mail_ids = messages[0].split()
+
+    for mail_id in mail_ids:
+        status, msg_data = mail.fetch(mail_id, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+
+        subject = safe_decode(msg.get("Subject"))
+        if not any(k in subject.upper() for k in KEYWORDS):
+            mail.store(mail_id, "+FLAGS", "\\Seen")
+            continue
+
+        for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
+                data = part.get_payload(decode=True)
+                if data:
+                    info = extract_from_pdf_bytes(data)
+                    process_weighment(info)
+
+        mail.store(mail_id, "+FLAGS", "\\Seen")
+
+    mail.logout()
+
+
 # ================= MAIN =================
 if __name__ == "__main__":
     rebuild_last_15_days()
@@ -257,6 +285,8 @@ if __name__ == "__main__":
         try:
             now = now_ist()
             hour_marker = now.strftime("%Y-%m-%d %H")
+
+            check_mail()
 
             if now.minute == 0 and hour_marker != last_hour_sent:
                 send_hourly_status()
