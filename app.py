@@ -28,14 +28,19 @@ def now_ist():
 
 
 def format_dt(dt_obj):
+    if not dt_obj:
+        return "Time Not Captured"
     return dt_obj.strftime("%d-%b-%y | %I:%M %p")
 
 
 # ================= TELEGRAM =================
 def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
-    requests.post(url, data=payload, timeout=20)
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": message}
+        requests.post(url, data=payload, timeout=20)
+    except Exception as e:
+        print("Telegram Error:", e)
 
 
 # ================= HELPERS =================
@@ -62,6 +67,8 @@ def normalize_text(s: str) -> str:
 
 
 def parse_dt(dt_str):
+    if not dt_str:
+        return None
     for fmt in ("%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"):
         try:
             return datetime.strptime(dt_str, fmt)
@@ -93,87 +100,95 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 
 # ================= PROCESS WEIGHMENT =================
 def process_weighment(info, silent=False):
-    rst = info["RST"]
-    tare_exists = bool(info["TareKg"])
-    gross_exists = bool(info["GrossKg"])
+    try:
+        rst = info["RST"]
+        if not rst:
+            return
 
-    tare_dt = parse_dt(info["TareDT"]) if info["TareDT"] else None
-    gross_dt = parse_dt(info["GrossDT"]) if info["GrossDT"] else None
+        tare_exists = bool(info["TareKg"])
+        gross_exists = bool(info["GrossKg"])
 
-    # ENTRY (single weight)
-    if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
+        tare_dt = parse_dt(info["TareDT"])
+        gross_dt = parse_dt(info["GrossDT"])
 
-        in_type = "Tare" if tare_exists else "Gross"
-        in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
-        in_time = tare_dt if tare_exists else gross_dt
-        out_type = "Gross" if tare_exists else "Tare"
+        # ================= ENTRY =================
+        if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
 
-        pending_yard[rst] = {
-            "Vehicle": info["Vehicle"],
-            "Party": info["Party"],
-            "Material": info["Material"],
-            "InTime": in_time
-        }
+            in_type = "Tare" if tare_exists else "Gross"
+            in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
+            in_time = tare_dt if tare_exists else gross_dt
+            out_type = "Gross" if tare_exists else "Tare"
 
-        if not silent:
-            message = (
-                "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-                f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-                f"👤 {info['Party']}\n"
-                f"📍 PLACE : {info['Place']}\n"
-                f"🌾 MATERIAL : {info['Material']}\n"
-                f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-                f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-                f"⚖ {in_type}  : {in_weight} Kg\n\n"
-                f"⟪ OUT ⟫ Pending final weighment\n"
-                f"⚖ {out_type}  : Pending final weighment\n\n"
-                "🔵 NET LOAD : Pending final weighment\n"
-                "🟡 YARD TIME : Pending final weighment\n\n"
-                "🟡 STATUS : VEHICLE ENTERED YARD"
-            )
-            send_telegram(message)
-        return
+            pending_yard[rst] = {
+                "Vehicle": info["Vehicle"],
+                "Party": info["Party"],
+                "Material": info["Material"],
+                "InTime": in_time or now_ist()
+            }
 
-    # COMPLETION
-    if tare_exists and gross_exists and tare_dt and gross_dt:
+            if not silent:
+                message = (
+                    "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+                    f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
+                    f"👤 {info['Party']}\n"
+                    f"📍 PLACE : {info['Place']}\n"
+                    f"🌾 MATERIAL : {info['Material']}\n"
+                    f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+                    f"⟪ IN  ⟫ {format_dt(in_time)}\n"
+                    f"⚖ {in_type}  : {in_weight} Kg\n\n"
+                    f"⟪ OUT ⟫ Pending final weighment\n"
+                    f"⚖ {out_type}  : Pending final weighment\n\n"
+                    "🔵 NET LOAD : Pending final weighment\n"
+                    "🟡 YARD TIME : Pending final weighment\n\n"
+                    "🟡 STATUS : VEHICLE ENTERED YARD"
+                )
+                send_telegram(message)
+            return
 
-        in_time = min(tare_dt, gross_dt)
-        out_time = max(tare_dt, gross_dt)
+        # ================= COMPLETION =================
+        if tare_exists and gross_exists and tare_dt and gross_dt:
 
-        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
-        duration = out_time - in_time
-        minutes = int(duration.total_seconds() // 60)
-        yard_time = f"{minutes // 60}h {minutes % 60}m"
+            in_time = min(tare_dt, gross_dt)
+            out_time = max(tare_dt, gross_dt)
 
-        completed_weighments.append({
-            "time": out_time,
-            "net": net,
-            "material": info["Material"]
-        })
+            net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
+            duration = out_time - in_time
+            minutes = int(duration.total_seconds() // 60)
+            yard_time = f"{minutes // 60}h {minutes % 60}m"
 
-        if rst in pending_yard:
-            del pending_yard[rst]
+            completed_weighments.append({
+                "time": out_time,
+                "net": net,
+                "material": info["Material"]
+            })
 
-        if not silent:
-            message = (
-                "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
-                f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-                f"👤 {info['Party']}\n"
-                f"📍 PLACE : {info['Place']}\n"
-                f"🌾 MATERIAL : {info['Material']}\n"
-                f"📦 BAGS : {info['Bags'] or '-'}\n\n"
-                f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-                f"⟪ OUT ⟫ {format_dt(out_time)}\n\n"
-                f"🔵 NET LOAD : {net} Kg\n"
-                f"🟡 YARD TIME : {yard_time}\n\n"
-                "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
-            )
-            send_telegram(message)
+            if rst in pending_yard:
+                del pending_yard[rst]
+
+            if not silent:
+                message = (
+                    "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+                    f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
+                    f"👤 {info['Party']}\n"
+                    f"📍 PLACE : {info['Place']}\n"
+                    f"🌾 MATERIAL : {info['Material']}\n"
+                    f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+                    f"⟪ IN  ⟫ {format_dt(in_time)}\n"
+                    f"⟪ OUT ⟫ {format_dt(out_time)}\n\n"
+                    f"🔵 NET LOAD : {net} Kg\n"
+                    f"🟡 YARD TIME : {yard_time}\n\n"
+                    "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
+                )
+                send_telegram(message)
+
+    except Exception as e:
+        print("Process Error:", e)
 
 
 # ================= HOURLY =================
 def send_hourly_status():
     global last_hour_sent
+
     now = now_ist()
     one_hour_ago = now - timedelta(hours=1)
     hour_label = now.strftime("%I %p").lstrip("0")
@@ -292,6 +307,6 @@ if __name__ == "__main__":
                 send_hourly_status()
 
         except Exception as e:
-            print("Error:", e)
+            print("Main Loop Error:", e)
 
         time.sleep(30)
