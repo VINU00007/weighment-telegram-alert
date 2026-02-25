@@ -17,16 +17,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
+IMAP_PORT = 993
 KEYWORDS = ["WEIGHMENT"]
-
-completed_weighments = []
-last_hour_sent = None
-
-
-# ================= TIME =================
-def now_ist():
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
-
 
 # ================= TELEGRAM =================
 def send_telegram(message: str):
@@ -39,36 +31,22 @@ def send_telegram(message: str):
 
 
 # ================= HELPERS =================
-def safe_decode(value):
-    if not value:
-        return ""
-    parts = decode_header(value)
-    out = []
-    for part, enc in parts:
-        if isinstance(part, bytes):
-            out.append(part.decode(enc or "utf-8", errors="replace"))
-        else:
-            out.append(str(part))
-    return "".join(out)
+def safe_str(val):
+    return str(val) if val else ""
 
-
-def pick(text: str, pattern: str) -> str:
+def safe_pick(text, pattern):
     m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ""
 
-
-def normalize_text(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
-
-
 def parse_dt(dt_str):
+    if not dt_str:
+        return None
     for fmt in ("%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"):
         try:
             return datetime.strptime(dt_str, fmt)
         except:
             continue
     return None
-
 
 def format_dt(dt_str):
     dt_obj = parse_dt(dt_str)
@@ -78,22 +56,23 @@ def format_dt(dt_str):
 # ================= PDF EXTRACTION =================
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        text = pdf.pages[0].extract_text() or ""
+        raw_text = pdf.pages[0].extract_text()
+        text = raw_text if raw_text else ""
 
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
     return {
-        "RST": pick(text, r"RST\s*:\s*(\d+)"),
-        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
-        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")),
-        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")),
-        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO")),
-        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
-        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
-        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
-        "NetKg": pick(text, r"Net\.\s*:\s*(\d+)"),
-        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
-        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
+        "RST": safe_pick(text, r"RST\s*:\s*(\d+)"),
+        "Vehicle": safe_pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
+        "Party": safe_pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE"),
+        "Place": safe_pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)"),
+        "Material": safe_pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO"),
+        "Bags": safe_pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
+        "GrossKg": safe_pick(text, r"Gross\.\s*:\s*(\d+)"),
+        "TareKg": safe_pick(text, r"Tare\.\s*:\s*(\d+)"),
+        "NetKg": safe_pick(text, r"Net\.\s*:\s*(\d+)"),
+        "GrossDT": safe_pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
+        "TareDT": safe_pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
     }
 
 
@@ -101,16 +80,16 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 def send_entry_alert(info):
     message = (
         "⚖️  WEIGHMENT ENTRY  ⚖️\n\n"
-        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
-        f"👤 {info['Party']}\n"
-        f"📍 PLACE : {info['Place']}\n"
-        f"🌾 MATERIAL : {info['Material']}\n"
-        f"📦 BAGS : {info['Bags'] or ''}\n\n"
+        f"🧾 RST : {safe_str(info['RST'])}   🚛 {safe_str(info['Vehicle'])}\n"
+        f"👤 {safe_str(info['Party'])}\n"
+        f"📍 PLACE : {safe_str(info['Place'])}\n"
+        f"🌾 MATERIAL : {safe_str(info['Material'])}\n"
+        f"📦 BAGS : {safe_str(info['Bags'])}\n\n"
         f"🕒 Tare Time   : {format_dt(info['TareDT'])}\n"
-        f"⚖ Tare Weight : {info['TareKg'] or ''} Kg\n\n"
+        f"⚖ Tare Weight : {safe_str(info['TareKg'])} Kg\n\n"
         f"🕒 Gross Time  : {format_dt(info['GrossDT'])}\n"
-        f"⚖ Gross Weight: {info['GrossKg'] or ''} Kg\n\n"
-        f"🔵 NET LOAD     : {info['NetKg'] or ''} Kg\n\n"
+        f"⚖ Gross Weight: {safe_str(info['GrossKg'])} Kg\n\n"
+        f"🔵 NET LOAD     : {safe_str(info['NetKg'])} Kg\n\n"
         "🟡 STATUS : VEHICLE ENTERED YARD"
     )
 
@@ -119,7 +98,8 @@ def send_entry_alert(info):
 
 # ================= COMPLETION ALERT =================
 def send_completion_alert(info):
-    net_kg = int(info["NetKg"] or 0)
+    net_val = safe_str(info["NetKg"]).replace(",", "")
+    net_kg = int(net_val) if net_val.isdigit() else 0
 
     tare_dt_obj = parse_dt(info["TareDT"])
     gross_dt_obj = parse_dt(info["GrossDT"])
@@ -132,15 +112,15 @@ def send_completion_alert(info):
 
     message = (
         "⚖️  WEIGHMENT COMPLETED  ⚖️\n\n"
-        f"🧾 RST : {info['RST']}   🚛 {info['Vehicle']}\n"
-        f"👤 {info['Party']}\n"
-        f"📍 PLACE : {info['Place']}\n"
-        f"🌾 MATERIAL : {info['Material']}\n"
-        f"📦 BAGS : {info['Bags'] or ''}\n\n"
+        f"🧾 RST : {safe_str(info['RST'])}   🚛 {safe_str(info['Vehicle'])}\n"
+        f"👤 {safe_str(info['Party'])}\n"
+        f"📍 PLACE : {safe_str(info['Place'])}\n"
+        f"🌾 MATERIAL : {safe_str(info['Material'])}\n"
+        f"📦 BAGS : {safe_str(info['Bags'])}\n\n"
         f"🕒 Tare Time   : {format_dt(info['TareDT'])}\n"
-        f"⚖ Tare Weight : {info['TareKg']} Kg\n\n"
+        f"⚖ Tare Weight : {safe_str(info['TareKg'])} Kg\n\n"
         f"🕒 Gross Time  : {format_dt(info['GrossDT'])}\n"
-        f"⚖ Gross Weight: {info['GrossKg']} Kg\n\n"
+        f"⚖ Gross Weight: {safe_str(info['GrossKg'])} Kg\n\n"
         f"🔵 NET LOAD     : {net_kg} Kg\n"
         f"🟡 YARD TIME    : {duration_text}\n\n"
         "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
@@ -151,7 +131,7 @@ def send_completion_alert(info):
 
 # ================= EMAIL CHECK =================
 def check_mail():
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+    mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
@@ -163,7 +143,7 @@ def check_mail():
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        subject = safe_decode(msg.get("Subject"))
+        subject = msg.get("Subject", "")
         if not any(k in subject.upper() for k in KEYWORDS):
             mail.store(mail_id, "+FLAGS", "\\Seen")
             continue
@@ -186,6 +166,7 @@ def check_mail():
 
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
+    print("🚀 Weighment Telegram Automation Started...")
     while True:
         try:
             check_mail()
