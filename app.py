@@ -8,7 +8,6 @@ import re
 from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
-import json
 
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
@@ -16,28 +15,12 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
+KEYWORDS = ["WEIGHMENT"]
 
 completed_weighments = []
 pending_yard = {}
 last_hour_sent = None
-
-STATE_FILE = "last_uid.json"
-
-
-# ================= STATE SAVE =================
-def load_last_uid():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return int(json.load(f)["last_uid"])
-        except:
-            return None
-    return None
-
-
-def save_last_uid(uid):
-    with open(STATE_FILE, "w") as f:
-        json.dump({"last_uid": int(uid)}, f)
+last_uid_processed = None
 
 
 # ================= TIME =================
@@ -105,7 +88,10 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
         "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
-        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
+        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")),
+        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")),
+        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO")),
+        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
         "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
         "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
         "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
@@ -127,6 +113,7 @@ def process_weighment(info):
 
     # ENTRY
     if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
+
         in_type = "Tare" if tare_exists else "Gross"
         in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
         in_time = tare_dt if tare_exists else gross_dt
@@ -138,86 +125,106 @@ def process_weighment(info):
             "InTime": in_time or now_ist()
         }
 
-        msg = (
+        message = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n\n"
+            f"👤 PARTY : {info['Party']}\n"
+            f"📍 PLACE : {info['Place']}\n"
+            f"🌾 MATERIAL : {info['Material']}\n"
+            f"📦 BAGS : {info['Bags'] or '-'}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⚖ {in_type} : {in_weight} Kg\n\n"
-            "⟪ OUT ⟫ Pending final weighment\n"
-            f"⚖ {out_type} : Pending final weighment\n\n"
+            f"⚖ {in_type}  : {in_weight} Kg\n\n"
+            f"⟪ OUT ⟫ Pending final weighment\n"
+            f"⚖ {out_type}  : Pending final weighment\n\n"
+            "🔵 NET LOAD : Pending final weighment\n"
+            "🟡 YARD TIME : Pending final weighment\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
-        send_telegram(msg)
+        send_telegram(message)
         return
 
     # COMPLETION
     if tare_exists and gross_exists and tare_dt and gross_dt:
+
         in_time = min(tare_dt, gross_dt)
         out_time = max(tare_dt, gross_dt)
+
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
+        duration = out_time - in_time
+        minutes = int(duration.total_seconds() // 60)
+        yard_time = f"{minutes // 60}h {minutes % 60}m"
+
+        completed_weighments.append({
+            "time": out_time,
+            "net": net,
+            "material": info["Material"]
+        })
 
         if rst in pending_yard:
             del pending_yard[rst]
 
-        msg = (
+        message = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n\n"
+            f"👤 PARTY : {info['Party']}\n"
+            f"📍 PLACE : {info['Place']}\n"
+            f"🌾 MATERIAL : {info['Material']}\n"
+            f"📦 BAGS : {info['Bags'] or '-'}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⟪ OUT ⟫ {format_dt(out_time)}\n\n"
-            f"🔵 NET LOAD : {net} Kg\n\n"
+            f"⚖ Tare  : {info['TareKg']} Kg\n\n"
+            f"⟪ OUT ⟫ {format_dt(out_time)}\n"
+            f"⚖ Gross : {info['GrossKg']} Kg\n\n"
+            f"🔵 NET LOAD : {net} Kg\n"
+            f"🟡 YARD TIME : {yard_time}\n\n"
             "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
         )
-        send_telegram(msg)
+        send_telegram(message)
 
 
-# ================= CHECK MAIL (NEVER MISSES) =================
+# ================= CHECK MAIL USING UID =================
 def check_mail():
+    global last_uid_processed
+
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
     result, data = mail.uid("search", None, "ALL")
-    all_uids = [int(x) for x in data[0].split()]
+    uids = data[0].split()
 
-    if not all_uids:
+    if not uids:
         mail.logout()
         return
 
-    last_uid = load_last_uid()
-    if last_uid is None:
-        save_last_uid(all_uids[-1])
+    if last_uid_processed is None:
+        last_uid_processed = uids[-1]
         mail.logout()
         return
 
-    new_uids = [uid for uid in all_uids if uid > last_uid]
+    new_uids = [uid for uid in uids if int(uid) > int(last_uid_processed)]
 
     for uid in new_uids:
-        _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
-        raw = msg_data[0][1]
-        msg = email.message_from_bytes(raw)
+        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
 
-        subject = safe_decode(msg.get("Subject")).upper()
-
-        # accept exact subject like in your screenshot
-        if not ("WEIGHMENT" in subject or "SLIP" in subject):
+        subject = safe_decode(msg.get("Subject"))
+        if not any(k in subject.upper() for k in KEYWORDS):
             continue
 
         for part in msg.walk():
-            ctype = part.get_content_type()
-            if "pdf" in ctype:
-                pdf_bytes = part.get_payload(decode=True)
-                if pdf_bytes:
-                    info = extract_from_pdf_bytes(pdf_bytes)
+            if part.get_content_type() == "application/pdf":
+                data = part.get_payload(decode=True)
+                if data:
+                    info = extract_from_pdf_bytes(data)
                     process_weighment(info)
 
-        save_last_uid(uid)
+        last_uid_processed = uid
 
     mail.logout()
 
 
-# ================= HOURLY STATUS =================
+# ================= HOURLY =================
 def send_hourly_status():
     global last_hour_sent
     now = now_ist()
@@ -225,16 +232,24 @@ def send_hourly_status():
     hour_label = now.strftime("%I %p").lstrip("0")
 
     recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
-    msg = f"⏱ HOURLY STATUS – {hour_label}\n\n"
 
-    msg += f"✅ Completed : {len(recent)}\n" if recent else "No Completed Weighments In The Past Hour.\n"
-    msg += f"\n🟡 Vehicles Inside Yard : {len(pending_yard)}\n" if pending_yard else "\nYard Is Clear.\n"
+    message = f"⏱ HOURLY STATUS – {hour_label}\n\n"
 
-    send_telegram(msg)
+    if recent:
+        message += f"✅ Completed : {len(recent)}\n"
+    else:
+        message += "No Completed Weighments In The Past Hour.\n"
+
+    if pending_yard:
+        message += f"\n🟡 Vehicles Inside Yard : {len(pending_yard)}\n"
+    else:
+        message += "\nYard Is Clear.\n"
+
+    send_telegram(message)
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
-# ================= MAIN LOOP =================
+# ================= MAIN =================
 if __name__ == "__main__":
     while True:
         try:
