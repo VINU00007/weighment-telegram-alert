@@ -8,6 +8,7 @@ import re
 from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
+import json
 
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
@@ -15,11 +16,28 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
-KEYWORDS = ["WEIGHMENT"]
 
 completed_weighments = []
 pending_yard = {}
 last_hour_sent = None
+
+STATE_FILE = "last_uid.json"
+
+
+# ================= STATE SAVE =================
+def load_last_uid():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                return int(json.load(f)["last_uid"])
+        except:
+            return None
+    return None
+
+
+def save_last_uid(uid):
+    with open(STATE_FILE, "w") as f:
+        json.dump({"last_uid": int(uid)}, f)
 
 
 # ================= TIME =================
@@ -87,10 +105,7 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
         "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
-        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")),
-        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")),
-        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO")),
-        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
+        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
         "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
         "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
         "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
@@ -123,7 +138,7 @@ def process_weighment(info):
             "InTime": in_time or now_ist()
         }
 
-        message = (
+        msg = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
             f"🌾 MATERIAL : {info['Material']}\n\n"
@@ -133,7 +148,7 @@ def process_weighment(info):
             f"⚖ {out_type} : Pending final weighment\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
-        send_telegram(message)
+        send_telegram(msg)
         return
 
     # COMPLETION
@@ -142,16 +157,10 @@ def process_weighment(info):
         out_time = max(tare_dt, gross_dt)
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
 
-        completed_weighments.append({
-            "time": out_time,
-            "net": net,
-            "material": info["Material"]
-        })
-
         if rst in pending_yard:
             del pending_yard[rst]
 
-        message = (
+        msg = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
             f"🌾 MATERIAL : {info['Material']}\n\n"
@@ -160,39 +169,50 @@ def process_weighment(info):
             f"🔵 NET LOAD : {net} Kg\n\n"
             "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
         )
-        send_telegram(message)
+        send_telegram(msg)
 
 
-# ================= CHECK MAIL (REAL-TIME) =================
+# ================= CHECK MAIL (NEVER MISSES) =================
 def check_mail():
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    # Real-time: check only new unseen mails
-    result, data = mail.uid("search", None, "UNSEEN")
-    uids = data[0].split()
+    result, data = mail.uid("search", None, "ALL")
+    all_uids = [int(x) for x in data[0].split()]
 
-    if not uids:
+    if not all_uids:
         mail.logout()
         return
 
-    for uid in uids:
-        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
+    last_uid = load_last_uid()
+    if last_uid is None:
+        save_last_uid(all_uids[-1])
+        mail.logout()
+        return
 
-        subject = safe_decode(msg.get("Subject"))
-        if not any(k in subject.upper() for k in KEYWORDS):
+    new_uids = [uid for uid in all_uids if uid > last_uid]
+
+    for uid in new_uids:
+        _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
+        raw = msg_data[0][1]
+        msg = email.message_from_bytes(raw)
+
+        subject = safe_decode(msg.get("Subject")).upper()
+
+        # accept exact subject like in your screenshot
+        if not ("WEIGHMENT" in subject or "SLIP" in subject):
             continue
 
-        # Process PDF attachment
         for part in msg.walk():
-            if part.get_content_type() == "application/pdf":
-                data = part.get_payload(decode=True)
-                if data:
-                    info = extract_from_pdf_bytes(data)
+            ctype = part.get_content_type()
+            if "pdf" in ctype:
+                pdf_bytes = part.get_payload(decode=True)
+                if pdf_bytes:
+                    info = extract_from_pdf_bytes(pdf_bytes)
                     process_weighment(info)
+
+        save_last_uid(uid)
 
     mail.logout()
 
@@ -205,20 +225,12 @@ def send_hourly_status():
     hour_label = now.strftime("%I %p").lstrip("0")
 
     recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
+    msg = f"⏱ HOURLY STATUS – {hour_label}\n\n"
 
-    message = f"⏱ HOURLY STATUS – {hour_label}\n\n"
+    msg += f"✅ Completed : {len(recent)}\n" if recent else "No Completed Weighments In The Past Hour.\n"
+    msg += f"\n🟡 Vehicles Inside Yard : {len(pending_yard)}\n" if pending_yard else "\nYard Is Clear.\n"
 
-    if recent:
-        message += f"✅ Completed : {len(recent)}\n"
-    else:
-        message += "No Completed Weighments In The Past Hour.\n"
-
-    if pending_yard:
-        message += f"\n🟡 Vehicles Inside Yard : {len(pending_yard)}\n"
-    else:
-        message += "\nYard Is Clear.\n"
-
-    send_telegram(message)
+    send_telegram(msg)
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
