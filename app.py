@@ -20,7 +20,6 @@ KEYWORDS = ["WEIGHMENT"]
 completed_weighments = []
 pending_yard = {}
 last_hour_sent = None
-last_uid_processed = None
 
 
 # ================= TIME =================
@@ -130,7 +129,7 @@ def process_weighment(info):
             f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
             f"⚖ {in_type} : {in_weight} Kg\n\n"
-            f"⟪ OUT ⟫ Pending final weighment\n"
+            "⟪ OUT ⟫ Pending final weighment\n"
             f"⚖ {out_type} : Pending final weighment\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
@@ -164,29 +163,21 @@ def process_weighment(info):
         send_telegram(message)
 
 
-# ================= CHECK MAIL USING UID =================
+# ================= CHECK MAIL (REAL-TIME) =================
 def check_mail():
-    global last_uid_processed
-
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    result, data = mail.uid("search", None, "ALL")
+    # Real-time: check only new unseen mails
+    result, data = mail.uid("search", None, "UNSEEN")
     uids = data[0].split()
 
     if not uids:
         mail.logout()
         return
 
-    if last_uid_processed is None:
-        last_uid_processed = uids[-1]
-        mail.logout()
-        return
-
-    new_uids = [uid for uid in uids if int(uid) > int(last_uid_processed)]
-
-    for uid in new_uids:
+    for uid in uids:
         result, msg_data = mail.uid("fetch", uid, "(RFC822)")
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
@@ -195,6 +186,7 @@ def check_mail():
         if not any(k in subject.upper() for k in KEYWORDS):
             continue
 
+        # Process PDF attachment
         for part in msg.walk():
             if part.get_content_type() == "application/pdf":
                 data = part.get_payload(decode=True)
@@ -202,12 +194,10 @@ def check_mail():
                     info = extract_from_pdf_bytes(data)
                     process_weighment(info)
 
-        last_uid_processed = uid
-
     mail.logout()
 
 
-# ================= HOURLY =================
+# ================= HOURLY STATUS =================
 def send_hourly_status():
     global last_hour_sent
     now = now_ist()
@@ -232,7 +222,7 @@ def send_hourly_status():
     last_hour_sent = now.strftime("%Y-%m-%d %H")
 
 
-# ================= MAIN =================
+# ================= MAIN LOOP =================
 if __name__ == "__main__":
     while True:
         try:
