@@ -36,13 +36,13 @@ def safe_decode(value):
     if not value:
         return ""
     parts = decode_header(value)
-    out = []
+    decoded = []
     for part, enc in parts:
         if isinstance(part, bytes):
-            out.append(part.decode(enc or "utf-8", errors="replace"))
+            decoded.append(part.decode(enc or "utf-8", errors="replace"))
         else:
-            out.append(str(part))
-    return "".join(out)
+            decoded.append(str(part))
+    return "".join(decoded)
 
 
 def pick(text: str, pattern: str) -> str:
@@ -139,6 +139,9 @@ def process_weighment(info):
         in_time = min(tare_dt, gross_dt)
         out_time = max(tare_dt, gross_dt)
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
+        duration = out_time - in_time
+        minutes = int(duration.total_seconds() // 60)
+        yard_time = f"{minutes // 60}h {minutes % 60}m"
 
         if rst in pending_yard:
             del pending_yard[rst]
@@ -154,7 +157,8 @@ def process_weighment(info):
             f"⚖ Tare  : {info['TareKg']} Kg\n\n"
             f"⟪ OUT ⟫ {format_dt(out_time)}\n"
             f"⚖ Gross : {info['GrossKg']} Kg\n\n"
-            f"🔵 NET LOAD : {net} Kg\n\n"
+            f"🔵 NET LOAD : {net} Kg\n"
+            f"🟡 YARD TIME : {yard_time}\n\n"
             "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
         )
         send_telegram(message)
@@ -187,8 +191,11 @@ def check_mail():
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
 
-        subject = safe_decode(msg.get("Subject"))
+        raw_subject = msg.get("Subject")
+        subject = safe_decode(raw_subject) if raw_subject else ""
+
         if not any(k in subject.upper() for k in KEYWORDS):
+            last_uid_processed = uid
             continue
 
         for part in msg.walk():
