@@ -17,7 +17,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 IMAP_SERVER = "imap.gmail.com"
 KEYWORDS = ["WEIGHMENT"]
 
-pending_yard = {}
 last_uid_processed = None
 
 
@@ -46,6 +45,8 @@ def safe_decode(value):
 
 
 def pick(text: str, pattern: str) -> str:
+    if not text:
+        return ""
     m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ""
 
@@ -73,49 +74,56 @@ def format_dt(dt_obj):
 
 # ================= PDF EXTRACTION =================
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        text = pdf.pages[0].extract_text() or ""
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            raw_text = pdf.pages[0].extract_text()
+
+        if not raw_text:
+            print("⚠ PDF text extraction returned None")
+            return {}
+
+        text = str(raw_text)
+
+    except Exception as e:
+        print("PDF Read Error:", e)
+        return {}
 
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
     return {
-        "RST": pick(text, r"RST\s*:\s*(\d+)"),
-        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
-        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE")),
-        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)")),
-        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO")),
-        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)"),
-        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
-        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
-        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
-        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
+        "RST": pick(text, r"RST\s*:\s*(\d+)") or "",
+        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)") or "",
+        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE") or ""),
+        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)") or ""),
+        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO") or ""),
+        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)") or "",
+        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)") or "",
+        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)") or "",
+        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat) or "",
+        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat) or "",
     }
 
 
 # ================= PROCESS WEIGHMENT =================
 def process_weighment(info):
-    rst = info["RST"]
-    if not rst:
+    if not info or not info.get("RST"):
+        print("⚠ Invalid PDF data skipped")
         return
 
+    rst = info["RST"]
     tare_exists = bool(info["TareKg"])
     gross_exists = bool(info["GrossKg"])
 
     tare_dt = parse_dt(info["TareDT"])
     gross_dt = parse_dt(info["GrossDT"])
 
-    # ENTRY
+    # ================= SINGLE ENTRY =================
     if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
 
         in_type = "Tare" if tare_exists else "Gross"
         in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
         in_time = tare_dt if tare_exists else gross_dt
         out_type = "Gross" if tare_exists else "Tare"
-
-        pending_yard[rst] = {
-            "Vehicle": info["Vehicle"],
-            "Material": info["Material"]
-        }
 
         message = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
@@ -130,21 +138,20 @@ def process_weighment(info):
             f"⚖ {out_type}  : Pending final weighment\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
+
         send_telegram(message)
         return
 
-    # COMPLETION
+    # ================= COMPLETED =================
     if tare_exists and gross_exists and tare_dt and gross_dt:
 
         in_time = min(tare_dt, gross_dt)
         out_time = max(tare_dt, gross_dt)
+
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
         duration = out_time - in_time
         minutes = int(duration.total_seconds() // 60)
         yard_time = f"{minutes // 60}h {minutes % 60}m"
-
-        if rst in pending_yard:
-            del pending_yard[rst]
 
         message = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
@@ -161,10 +168,11 @@ def process_weighment(info):
             f"🟡 YARD TIME : {yard_time}\n\n"
             "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
         )
+
         send_telegram(message)
 
 
-# ================= CHECK MAIL (UID BASED) =================
+# ================= MAIL CHECK (UID BASED) =================
 def check_mail():
     global last_uid_processed
 
@@ -210,8 +218,10 @@ def check_mail():
     mail.logout()
 
 
-# ================= MAIN =================
+# ================= MAIN LOOP =================
 if __name__ == "__main__":
+    print("🚀 Weighment Monitor Started...")
+
     while True:
         try:
             check_mail()
