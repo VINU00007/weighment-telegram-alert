@@ -5,8 +5,9 @@ import os
 import requests
 import time
 import re
+import json
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timedelta
 import pdfplumber
 
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -15,9 +16,19 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 IMAP_SERVER = "imap.gmail.com"
-KEYWORDS = ["WEIGHMENT"]
 
-last_uid_processed = None
+PROCESSED_FILE = "processed.json"
+
+
+# ================= TIME =================
+def now_ist():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+def format_dt(dt_obj):
+    if not dt_obj:
+        return "Time Not Captured"
+    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
 
 
 # ================= TELEGRAM =================
@@ -35,18 +46,16 @@ def safe_decode(value):
     if not value:
         return ""
     parts = decode_header(value)
-    decoded = []
+    out = []
     for part, enc in parts:
         if isinstance(part, bytes):
-            decoded.append(part.decode(enc or "utf-8", errors="replace"))
+            out.append(part.decode(enc or "utf-8", errors="replace"))
         else:
-            decoded.append(str(part))
-    return "".join(decoded)
+            out.append(str(part))
+    return "".join(out)
 
 
 def pick(text: str, pattern: str) -> str:
-    if not text:
-        return ""
     m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ""
 
@@ -62,170 +71,134 @@ def parse_dt(dt_str):
         try:
             return datetime.strptime(dt_str, fmt)
         except:
-            continue
+            pass
     return None
-
-
-def format_dt(dt_obj):
-    if not dt_obj:
-        return "Time Not Captured"
-    return dt_obj.strftime("%d-%b-%y | %I:%M %p")
 
 
 # ================= PDF EXTRACTION =================
 def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
-    try:
-        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-            raw_text = pdf.pages[0].extract_text()
-
-        if not raw_text:
-            print("⚠ PDF text extraction returned None")
-            return {}
-
-        text = str(raw_text)
-
-    except Exception as e:
-        print("PDF Read Error:", e)
-        return {}
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        text = pdf.pages[0].extract_text() or ""
 
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
     return {
-        "RST": pick(text, r"RST\s*:\s*(\d+)") or "",
-        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)") or "",
-        "Party": normalize_text(pick(text, r"PARTY NAME:\s*(.+?)\s+PLACE") or ""),
-        "Place": normalize_text(pick(text, r"PLACE\s*:\s*([A-Z0-9\- ]+)") or ""),
-        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL NO") or ""),
-        "Bags": pick(text, r"\bBAGS\b\.?\s*:\s*(\d+)") or "",
-        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)") or "",
-        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)") or "",
-        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat) or "",
-        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat) or "",
+        "RST": pick(text, r"RST\s*:\s*(\d+)"),
+        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
+        "Material": normalize_text(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
+        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
+        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
+        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
+        "TareDT": pick(text, r"Tare\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
     }
 
 
 # ================= PROCESS WEIGHMENT =================
 def process_weighment(info):
-    if not info or not info.get("RST"):
-        print("⚠ Invalid PDF data skipped")
+    rst = info["RST"]
+    if not rst:
         return
 
-    rst = info["RST"]
     tare_exists = bool(info["TareKg"])
     gross_exists = bool(info["GrossKg"])
 
     tare_dt = parse_dt(info["TareDT"])
     gross_dt = parse_dt(info["GrossDT"])
 
-    # ================= SINGLE ENTRY =================
+    # ENTRY-only
     if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
-
         in_type = "Tare" if tare_exists else "Gross"
         in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
         in_time = tare_dt if tare_exists else gross_dt
         out_type = "Gross" if tare_exists else "Tare"
 
-        message = (
+        msg = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"👤 PARTY : {info['Party']}\n"
-            f"📍 PLACE : {info['Place']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n"
-            f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+            f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⚖ {in_type}  : {in_weight} Kg\n\n"
-            f"⟪ OUT ⟫ Pending final weighment\n"
-            f"⚖ {out_type}  : Pending final weighment\n\n"
+            f"⚖ {in_type} : {in_weight} Kg\n\n"
+            "⟪ OUT ⟫ Pending final weighment\n"
+            f"⚖ {out_type} : Pending\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
-
-        send_telegram(message)
+        send_telegram(msg)
         return
 
-    # ================= COMPLETED =================
+    # COMPLETION
     if tare_exists and gross_exists and tare_dt and gross_dt:
-
         in_time = min(tare_dt, gross_dt)
         out_time = max(tare_dt, gross_dt)
-
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
-        duration = out_time - in_time
-        minutes = int(duration.total_seconds() // 60)
-        yard_time = f"{minutes // 60}h {minutes % 60}m"
 
-        message = (
+        msg = (
             "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
-            f"👤 PARTY : {info['Party']}\n"
-            f"📍 PLACE : {info['Place']}\n"
-            f"🌾 MATERIAL : {info['Material']}\n"
-            f"📦 BAGS : {info['Bags'] or '-'}\n\n"
+            f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
-            f"⚖ Tare  : {info['TareKg']} Kg\n\n"
-            f"⟪ OUT ⟫ {format_dt(out_time)}\n"
-            f"⚖ Gross : {info['GrossKg']} Kg\n\n"
-            f"🔵 NET LOAD : {net} Kg\n"
-            f"🟡 YARD TIME : {yard_time}\n\n"
+            f"⟪ OUT ⟫ {format_dt(out_time)}\n\n"
+            f"🔵 NET LOAD : {net} Kg\n\n"
             "▣ LOAD LOCKED & APPROVED FOR GATE PASS"
         )
+        send_telegram(msg)
 
-        send_telegram(message)
 
-
-# ================= MAIL CHECK (UID BASED) =================
+# ================= MAIL CHECK (BULLETPROOF) =================
 def check_mail():
-    global last_uid_processed
+    # Load processed UIDs
+    try:
+        processed = set(json.load(open(PROCESSED_FILE)))
+    except:
+        processed = set()
 
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
+    # Always scan last 20 emails
     result, data = mail.uid("search", None, "ALL")
-    uids = data[0].split()
+    all_uids = [int(x) for x in data[0].split()]
+    recent_uids = all_uids[-20:]  # Bulletproof window
 
-    if not uids:
-        mail.logout()
-        return
-
-    if last_uid_processed is None:
-        last_uid_processed = uids[-1]
-        mail.logout()
-        return
-
-    new_uids = [uid for uid in uids if int(uid) > int(last_uid_processed)]
-
-    for uid in new_uids:
-        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        raw_email = msg_data[0][1]
-        msg = email.message_from_bytes(raw_email)
-
-        raw_subject = msg.get("Subject")
-        subject = safe_decode(raw_subject) if raw_subject else ""
-
-        if not any(k in subject.upper() for k in KEYWORDS):
-            last_uid_processed = uid
+    for uid in recent_uids:
+        if uid in processed:
             continue
 
-        for part in msg.walk():
-            if part.get_content_type() == "application/pdf":
-                data = part.get_payload(decode=True)
-                if data:
-                    info = extract_from_pdf_bytes(data)
-                    process_weighment(info)
+        result, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
+        raw = msg_data[0][1]
+        msg = email.message_from_bytes(raw)
 
-        last_uid_processed = uid
+        subject = safe_decode(msg.get("Subject")).upper()
+
+        # Detect weighment subject
+        if not ("WEIGH" in subject or "SLIP" in subject):
+            continue
+
+        # Accept ANY PDF type
+        for part in msg.walk():
+            if "pdf" in part.get_content_type():
+                pdf_bytes = part.get_payload(decode=True)
+                if pdf_bytes:
+                    try:
+                        info = extract_from_pdf_bytes(pdf_bytes)
+                        process_weighment(info)
+                        processed.add(uid)
+                    except Exception as e:
+                        print("PDF ERROR:", e)
+
+    # Save processed UIDs
+    with open(PROCESSED_FILE, "w") as f:
+        json.dump(list(processed), f)
 
     mail.logout()
 
 
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
-    print("🚀 Weighment Monitor Started...")
-
     while True:
         try:
             check_mail()
         except Exception as e:
-            print("Main Error:", e)
+            print("Error:", e)
 
         time.sleep(30)
