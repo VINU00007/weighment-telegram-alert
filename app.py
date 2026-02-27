@@ -5,7 +5,6 @@ import os
 import requests
 import time
 import re
-import json
 from datetime import datetime, timedelta
 from io import BytesIO
 import pdfplumber
@@ -17,52 +16,72 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-ENTRY_MEM_FILE = "sent_entry.json"
-COMP_MEM_FILE = "sent_complete.json"
+SENT_ENTRY = "SentEntryRSTs.json"
+SENT_COMPLETE = "SentCompletionRSTs.json"
 
 
-# ---------------- TIME HELPERS ---------------- #
+# ---------------- TIME HELPERS ----------------
+def now_ist():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
-def fmt(dt):
+
+def format_12h(dt):
     if not dt:
         return "Time N/A"
     return dt.strftime("%d-%b-%y | %I:%M %p")
 
 
-def parse_datetime(date_str, time_str):
-    try:
-        return datetime.strptime(f"{date_str} {time_str}", "%d-%b-%y %I:%M:%S %p")
-    except:
-        return None
-
-
-# ---------------- TELEGRAM ---------------- #
-
+# ---------------- TELEGRAM ----------------
 def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text})
     except:
-        print("[ERR] Telegram send error")
+        pass
 
 
-# ---------------- MEMORY HELPERS ---------------- #
+# ---------------- UTILS ----------------
+def safe_decode(value):
+    if not value:
+        return ""
+    parts = decode_header(value)
+    out = []
+    for p, enc in parts:
+        if isinstance(p, bytes):
+            out.append(p.decode(enc or "utf-8", errors="replace"))
+        else:
+            out.append(p)
+    return "".join(out)
 
-def load_mem(path):
-    if not os.path.exists(path):
-        return set()
-    try:
-        return set(json.load(open(path)))
-    except:
-        return set()
+
+def pick(text, pattern):
+    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else ""
 
 
-def save_mem(path, data):
-    json.dump(list(data), open(path, "w"), indent=2)
+def normalize(s):
+    return re.sub(r"\s+", " ", s.strip()) if s else ""
 
 
-# ---------------- PDF EXTRACTION ---------------- #
+def parse_dt(s):
+    if not s:
+        return None
+    fmts = ["%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"]
+    for f in fmts:
+        try:
+            return datetime.strptime(s, f)
+        except:
+            pass
+    return None
 
+
+def clean_material(m):
+    if not m:
+        return ""
+    return re.sub(r"\bCELL.*", "", m, flags=re.IGNORECASE).strip()
+
+
+# ---------------- PDF PARSE ----------------
 def extract_from_pdf(pdf_bytes):
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -71,47 +90,25 @@ def extract_from_pdf(pdf_bytes):
         print("[ERR] PDF read failure")
         return {}
 
-    # Gross
-    g = re.search(
-        r"Gross\.\s*:\s*(\d+)\s*Kgs\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(\d{1,2}:\d{2}:\d{2}\s+[AP]M)",
-        text)
+    dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
-    # Tare
-    t = re.search(
-        r"Tare\.\s*:\s*(\d+)\s*Kgs\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(\d{1,2}:\d{2}:\d{2}\s+[AP]M)",
-        text)
-
-    gross_wt = int(g.group(1)) if g else None
-    gross_dt = parse_datetime(g.group(2), g.group(3)) if g else None
-
-    tare_wt = int(t.group(1)) if t else None
-    tare_dt = parse_datetime(t.group(2), t.group(3)) if t else None
-
-    rst = pick(text, r"RST\s*:\s*(\d+)")
-    vehicle = pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\-]+)")
-    party = pick(text, r"PARTY\s*NAME\s*:\s*([A-Za-z0-9 ]+)")
-    material = pick(text, r"MATERIAL\s*:\s*([A-Za-z0-9 ]+)")
+    material = normalize(pick(text, r"MATERIAL\s*:\s*(.+)"))
+    material = clean_material(material)
 
     return {
-        "RST": rst,
-        "Vehicle": vehicle,
-        "Party": party,
-        "Material": clean_material(material),
-        "Gross": gross_wt,
-        "GrossTime": gross_dt,
-        "Tare": tare_wt,
-        "TareTime": tare_dt
+        "RST": pick(text, r"RST\s*:\s*(\d+)"),
+        "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\- ]+)"),
+        "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)"),
+        "Material": material,
+        "GrossKg": pick(text, r"Gross\.?:\s*(\d+)"),
+        "TareKg": pick(text, r"Tare\.?:\s*(\d+)"),
+        "GrossDT": pick(text, r"Gross.*?Kgs.*?" + dt_pat),
+        "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
     }
 
 
-def pick(text, pattern):
-    m = re.search(pattern, text, re.IGNORECASE)
-    return m.group(1).strip() if m else ""
-
-
-# ---------------- SCAN EMAILS ---------------- #
-
-def scan_last_50():
+# ---------------- EMAIL SCAN ----------------
+def scan_last_50_emails():
     yard = {}
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
@@ -125,124 +122,135 @@ def scan_last_50():
         _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
         raw = msg_data[0][1]
         msg = email.message_from_bytes(raw)
-        subject = safe_decode(msg.get("Subject")).upper()
 
+        subject = safe_decode(msg.get("Subject")).upper()
         if "WEIGH" not in subject and "SLIP" not in subject:
             continue
 
         for part in msg.walk():
             if "pdf" in part.get_content_type():
                 info = extract_from_pdf(part.get_payload(decode=True))
-                if info and info["RST"]:
-                    yard[info["RST"]] = info
+                if not info or not info.get("RST"):
+                    continue
 
-    print(f"[SCAN] {len(yard)} entries found")
+                rst = info["RST"]
+
+                if rst not in yard:
+                    yard[rst] = {
+                        "RST": rst,
+                        "Vehicle": info["Vehicle"],
+                        "Party": info["Party"],
+                        "Material": info["Material"],
+                        "Gross": None,
+                        "GrossTime": None,
+                        "Tare": None,
+                        "TareTime": None,
+                    }
+
+                if info["GrossKg"]:
+                    yard[rst]["Gross"] = int(info["GrossKg"])
+                    yard[rst]["GrossTime"] = parse_dt(info["GrossDT"])
+
+                if info["TareKg"]:
+                    yard[rst]["Tare"] = int(info["TareKg"])
+                    yard[rst]["TareTime"] = parse_dt(info["TareDT"])
+
     mail.logout()
+    print(f"[SCAN] {len(yard)} RST entries built")
     return yard
 
 
-def safe_decode(value):
-    if not value:
-        return ""
-    out = []
-    for part, enc in decode_header(value):
-        if isinstance(part, bytes):
-            out.append(part.decode(enc or "utf-8", errors="replace"))
-        else:
-            out.append(part)
-    return "".join(out)
+# ---------------- ALERT FORMAT ----------------
+def format_entry(d, is_complete):
+    rst = d["RST"]
+    v = d["Vehicle"]
+    p = d["Party"]
+    m = d["Material"]
+
+    gross = d["Gross"]
+    tare = d["Tare"]
+
+    gross_t = format_12h(d["GrossTime"])
+    tare_t = format_12h(d["TareTime"])
+
+    if not is_complete:
+        return (
+            f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
+            f"🧾 RST : {rst}   🚛 {v}\n"
+            f"🏭 PARTY : {p}\n"
+            f"🌾 MATERIAL : {m}\n\n"
+            f"⟪ FIRST WEIGHMENT ⟫\n"
+            f"⚖ { 'Gross' if gross else 'Tare'} : {gross or tare} Kg\n"
+            f"🕒 {gross_t if gross else tare_t}\n\n"
+            f"⟪ SECOND WEIGHMENT ⟫ Pending\n"
+            f"⚖ Gross : Pending\n\n"
+            f"🟡 STATUS : VEHICLE INSIDE YARD"
+        )
+
+    # Completed
+    net = abs(gross - tare)
+    in_time = min(d["GrossTime"], d["TareTime"])
+    out_time = max(d["GrossTime"], d["TareTime"])
+
+    return (
+        f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
+        f"🧾 RST : {rst}   🚛 {v}\n"
+        f"🏭 PARTY : {p}\n"
+        f"🌾 MATERIAL : {m}\n\n"
+        f"⟪ FIRST WEIGHMENT ⟫\n"
+        f"⚖ { 'Gross' if gross < tare else 'Tare'} : {min(gross, tare)} Kg\n"
+        f"🕒 {format_12h(in_time)}\n\n"
+        f"⟪ SECOND WEIGHMENT ⟫\n"
+        f"⚖ { 'Tare' if gross < tare else 'Gross'} : {max(gross, tare)} Kg\n"
+        f"🕒 {format_12h(out_time)}\n\n"
+        f"🔵 NET LOAD : {net} Kg\n\n"
+        f"🟢 STATUS : WEIGHMENT COMPLETED"
+    )
 
 
-# ---------------- ALERT LOGIC ---------------- #
+# ---------------- REALTIME ALERTS ----------------
+def load_set(file):
+    if not os.path.exists(file):
+        return set()
+    try:
+        return set(json.load(open(file)))
+    except:
+        return set()
 
-def send_alerts(yard, sent_entry, sent_complete):
+
+def save_set(file, data):
+    json.dump(list(data), open(file, "w"), indent=2)
+
+
+def send_alerts(yard):
+    sent_entry = load_set(SENT_ENTRY)
+    sent_complete = load_set(SENT_COMPLETE)
 
     for rst, d in yard.items():
         g = d["Gross"]
-        gt = d["GrossTime"]
         t = d["Tare"]
-        tt = d["TareTime"]
 
-        # ----- ENTRY ONLY -----
-        if (g and not t) or (t and not g):
-            if rst in sent_entry:
-                continue
-
-            # determine first
-            first_type = "Gross" if g else "Tare"
-            first_wt = g if g else t
-            first_dt = gt if g else tt
-
-            second_type = "Tare" if g else "Gross"
-
-            msg = (
-                f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
-                f"🧾 RST : {rst}   🚛 {d['Vehicle']}\n"
-                f"🏢 PARTY : {d['Party']}\n"
-                f"🌾 MATERIAL : {d['Material']}\n\n"
-                f"⟪ FIRST WEIGHMENT ⟫\n"
-                f"⚖ {first_type} : {first_wt} Kg\n"
-                f"🕒 {fmt(first_dt)}\n\n"
-                f"⟪ SECOND WEIGHMENT ⟫ Pending\n"
-                f"⚖ {second_type} : Pending\n\n"
-                f"🟡 STATUS : VEHICLE INSIDE YARD"
-            )
-
-            send_telegram(msg)
-            sent_entry.add(rst)
-            print(f"[ENTRY] Sent RST {rst}")
-            continue
-
-        # ----- COMPLETED -----
         if g and t:
-            if rst in sent_complete:
-                continue
+            if rst not in sent_complete:
+                send_telegram(format_entry(d, True))
+                sent_complete.add(rst)
+                print("[COMPLETE] Sent", rst)
+        else:
+            if rst not in sent_entry:
+                send_telegram(format_entry(d, False))
+                sent_entry.add(rst)
+                print("[ENTRY] Sent", rst)
 
-            # figure order
-            if gt < tt:
-                first_type, first_wt, first_dt = "Gross", g, gt
-                second_type, second_wt, second_dt = "Tare", t, tt
-            else:
-                first_type, first_wt, first_dt = "Tare", t, tt
-                second_type, second_wt, second_dt = "Gross", g, gt
-
-            net = abs(g - t)
-
-            msg = (
-                f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
-                f"🧾 RST : {rst}   🚛 {d['Vehicle']}\n"
-                f"🏢 PARTY : {d['Party']}\n"
-                f"🌾 MATERIAL : {d['Material']}\n\n"
-                f"⟪ FIRST WEIGHMENT ⟫\n"
-                f"⚖ {first_type} : {first_wt} Kg\n"
-                f"🕒 {fmt(first_dt)}\n\n"
-                f"⟪ SECOND WEIGHMENT ⟫\n"
-                f"⚖ {second_type} : {second_wt} Kg\n"
-                f"🕒 {fmt(second_dt)}\n\n"
-                f"🔵 NET LOAD : {net} Kg\n\n"
-                f"🟢 STATUS : WEIGHMENT COMPLETED"
-            )
-
-            send_telegram(msg)
-            sent_complete.add(rst)
-            print(f"[COMPLETE] Sent RST {rst}")
-
-    save_mem(ENTRY_MEM_FILE, sent_entry)
-    save_mem(COMP_MEM_FILE, sent_complete)
+    save_set(SENT_ENTRY, sent_entry)
+    save_set(SENT_COMPLETE, sent_complete)
 
 
-# ---------------- MAIN LOOP ---------------- #
-
+# ---------------- MAIN LOOP ----------------
 if __name__ == "__main__":
     while True:
         try:
-            yard = scan_last_50()
-
-            sent_entry = load_mem(ENTRY_MEM_FILE)
-            sent_complete = load_mem(COMP_MEM_FILE)
-
-            send_alerts(yard, sent_entry, sent_complete)
-
+            yard = scan_last_50_emails()
+            send_alerts(yard)
         except Exception as e:
             print("[ERR]", e)
 
