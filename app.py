@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timedelta
 from io import BytesIO
 import pdfplumber
-
+import json 
 IMAP_SERVER = "imap.gmail.com"
 
 EMAIL_USER = os.getenv("EMAIL_USER")
