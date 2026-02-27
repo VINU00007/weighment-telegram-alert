@@ -96,7 +96,7 @@ def extract_from_pdf(pdf_bytes):
         "RST": rst,
         "Vehicle": vehicle,
         "Party": party,
-        "Material": material,
+        "Material": clean_material(material),
         "Gross": gross_wt,
         "GrossTime": gross_dt,
         "Tare": tare_wt,
