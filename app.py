@@ -12,16 +12,13 @@ import pdfplumber
 
 IMAP_SERVER = "imap.gmail.com"
 
-# Load env vars
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# Storage files
-COMPLETED_FILE = "completed_records.json"
-PENDING_FILE = "pending_records.json"
-PROCESSED_FILE = "processed.json"
+SENT_ENTRY = "SentEntryRSTs.json"
+SENT_COMPLETE = "SentCompletionRSTs.json"
 
 
 def now_ist():
@@ -29,26 +26,27 @@ def now_ist():
 
 
 def format_12h(dt):
-    if not dt:
-        return "NA"
     return dt.strftime("%I:%M %p")
 
 
-def send_telegram(msg):
+def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
     except:
         pass
 
 
-def safe_decode(v):
-    if not v:
+def safe_decode(value):
+    if not value:
         return ""
-    parts = decode_header(v)
+    parts = decode_header(value)
     out = []
     for p, enc in parts:
-        out.append(p.decode(enc or "utf-8", errors="replace") if isinstance(p, bytes) else p)
+        if isinstance(p, bytes):
+            out.append(p.decode(enc or "utf-8", errors="replace"))
+        else:
+            out.append(p)
     return "".join(out)
 
 
@@ -58,7 +56,7 @@ def pick(text, pattern):
 
 
 def normalize(s):
-    return re.sub(r"\s+", " ", (s or "").strip())
+    return re.sub(r"\s+", " ", s.strip()) if s else ""
 
 
 def parse_dt(s):
@@ -73,197 +71,53 @@ def parse_dt(s):
     return None
 
 
-def load_json(f):
-    if not os.path.exists(f):
-        return []
+def load_set(file):
+    if not os.path.exists(file):
+        return set()
     try:
-        return json.load(open(f))
+        return set(json.load(open(file)))
     except:
-        return []
+        return set()
 
 
-def save_json(f, data):
-    with open(f, "w") as file:
-        json.dump(data, file, indent=2)
+def save_set(file, data):
+    json.dump(list(data), open(file, "w"), indent=2)
 
-
-# ============= PDF Extraction =============
 
 def extract_from_pdf(pdf_bytes):
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        text = pdf.pages[0].extract_text() or ""
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+    except:
+        print("[ERR] PDF read failure")
+        return {}
 
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
-    party = pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)")
-
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
-        "Vehicle": pick(text, r"Vehicle No\s*:\s*([A-Z0-9\- ]+)"),
-        "Party": party,
+        "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\- ]+)"),
+        "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)"),
         "Material": normalize(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
-        "GrossKg": pick(text, r"Gross\.\s*:\s*(\d+)"),
-        "TareKg": pick(text, r"Tare\.\s*:\s*(\d+)"),
-        "GrossDT": pick(text, r"Gross\.\s*:\s*\d+\s*Kgs\s*" + dt_pat),
-        "TareDT": pick(text, r"Tare\.\s*\d+\s*Kgs\s*" + dt_pat),
+        "GrossKg": pick(text, r"Gross\.?:\s*(\d+)"),
+        "TareKg": pick(text, r"Tare\.?:\s*(\d+)"),
+        "GrossDT": pick(text, r"Gross.*?Kgs.*?" + dt_pat),
+        "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
     }
 
 
-# ============= REAL-TIME PROCESSING =============
-
-def process_weighment(info):
-    completed = load_json(COMPLETED_FILE)
-    pending = load_json(PENDING_FILE)
-
-    rst = info["RST"]
-    if not rst:
-        return
-
-    tare = bool(info["TareKg"])
-    gross = bool(info["GrossKg"])
-    tare_dt = parse_dt(info["TareDT"])
-    gross_dt = parse_dt(info["GrossDT"])
-
-    # ENTRY
-    if (tare and not gross) or (gross and not tare):
-        in_type = "Tare" if tare else "Gross"
-        in_weight = info["TareKg"] if tare else info["GrossKg"]
-        in_time = tare_dt if tare else gross_dt
-        out_type = "Gross" if tare else "Tare"
-
-        entry = {
-            "RST": rst,
-            "Vehicle": info["Vehicle"],
-            "Party": info["Party"],
-            "Material": info["Material"],
-            "InTime": in_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "Pending": out_type
-        }
-
-        # Remove if old exists
-        pending = [p for p in pending if p["RST"] != rst]
-        pending.append(entry)
-        save_json(PENDING_FILE, pending)
-
-        msg = (
-            f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
-            f"RST {rst} | {info['Vehicle']} | {info['Party']} | {info['Material']}\n"
-            f"IN {format_12h(in_time)} | {in_type}: {in_weight} Kg\n"
-            f"Pending {out_type}"
-        )
-        send_telegram(msg)
-        return
-
-    # COMPLETION
-    if tare and gross and tare_dt and gross_dt:
-        in_time = min(tare_dt, gross_dt)
-        out_time = max(tare_dt, gross_dt)
-        net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
-
-        record = {
-            "RST": rst,
-            "Vehicle": info["Vehicle"],
-            "Party": info["Party"],
-            "Material": info["Material"],
-            "InTime": in_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "OutTime": out_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "Net": net,
-            "AlertSent": False
-        }
-
-        # Remove old pending entry
-        pending = [p for p in pending if p["RST"] != rst]
-        save_json(PENDING_FILE, pending)
-
-        # Add to completed
-        completed = [c for c in completed if c["RST"] != rst]
-        completed.append(record)
-        save_json(COMPLETED_FILE, completed)
-
-        # Real-time alert
-        msg = (
-            f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
-            f"RST {rst} | {info['Vehicle']} | {info['Party']} | {info['Material']}\n"
-            f"IN {format_12h(in_time)} | OUT {format_12h(out_time)} | NET {net} Kg"
-        )
-        send_telegram(msg)
-        record["AlertSent"] = True
-        save_json(COMPLETED_FILE, completed)
-
-
-# ============= MISSED ALERT RECOVERY =============
-
-def recover_missed_alerts():
-    completed = load_json(COMPLETED_FILE)
-    for r in completed[-15:]:  # last 15 records
-        if not r.get("AlertSent", False):
-            in_t = datetime.strptime(r["InTime"], "%Y-%m-%d %H:%M:%S")
-            out_t = datetime.strptime(r["OutTime"], "%Y-%m-%d %H:%M:%S")
-
-            msg = (
-                f"⚠️ MISSED ALERT RECOVERED ⚠️\n\n"
-                f"RST {r['RST']} | {r['Vehicle']} | {r['Party']} | {r['Material']}\n"
-                f"IN {format_12h(in_t)} | OUT {format_12h(out_t)} | NET {r['Net']} Kg"
-            )
-            send_telegram(msg)
-
-            r["AlertSent"] = True
-    save_json(COMPLETED_FILE, completed)
-
-
-# ============= DAILY SUMMARY AT 10 AM =============
-
-def send_daily_summary():
-    now = now_ist()
-    if now.hour != 10 or now.minute != 0:
-        return
-
-    completed = load_json(COMPLETED_FILE)
-    pending = load_json(PENDING_FILE)
-
-    start = (now - timedelta(days=1)).replace(hour=10, minute=0, second=0)
-    end = now.replace(hour=10, minute=0, second=0)
-
-    msg = f"📊 TODAY’S SUMMARY ({now.strftime('%d-%b %I:%M %p')})\n\n"
-
-    # Completed
-    for r in completed:
-        out_dt = datetime.strptime(r["OutTime"], "%Y-%m-%d %H:%M:%S")
-        if start <= out_dt <= end:
-            in_dt = datetime.strptime(r["InTime"], "%Y-%m-%d %H:%M:%S")
-            msg += (
-                f"RST {r['RST']} | {r['Vehicle']} | {r['Party']} | {r['Material']} | "
-                f"IN {format_12h(in_dt)} | OUT {format_12h(out_dt)} | NET {r['Net']} Kg\n"
-            )
-
-    # Pending
-    for p in pending:
-        in_dt = datetime.strptime(p["InTime"], "%Y-%m-%d %H:%M:%S")
-        msg += (
-            f"RST {p['RST']} | {p['Vehicle']} | {p['Party']} | {p['Material']} | "
-            f"IN {format_12h(in_dt)} | Pending {p['Pending']}\n"
-        )
-
-    send_telegram(msg)
-
-
-# ============= CHECK MAIL (last 20) =============
-
-def check_mail():
-    processed = set(load_json(PROCESSED_FILE))
-
+def scan_last_50_emails():
+    yard = {}
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
     _, data = mail.uid("search", None, "ALL")
     uids = [int(x) for x in data[0].split()]
-    recent = uids[-20:]
+
+    recent = uids[-50:]
 
     for uid in recent:
-        if uid in processed:
-            continue
-
         _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
         raw = msg_data[0][1]
         msg = email.message_from_bytes(raw)
@@ -275,23 +129,151 @@ def check_mail():
         for part in msg.walk():
             if "pdf" in part.get_content_type():
                 pdf_bytes = part.get_payload(decode=True)
-                if pdf_bytes:
-                    info = extract_from_pdf(pdf_bytes)
-                    process_weighment(info)
-                    processed.add(uid)
+                info = extract_from_pdf(pdf_bytes)
+                if not info or not info.get("RST"):
+                    continue
 
-    save_json(PROCESSED_FILE, list(processed))
+                rst = info["RST"]
+                if rst not in yard:
+                    yard[rst] = {
+                        "RST": rst,
+                        "Vehicle": info["Vehicle"],
+                        "Party": info["Party"],
+                        "Material": info["Material"],
+                        "Gross": None,
+                        "GrossTime": None,
+                        "Tare": None,
+                        "TareTime": None
+                    }
+
+                if info["GrossKg"]:
+                    yard[rst]["Gross"] = int(info["GrossKg"])
+                    yard[rst]["GrossTime"] = parse_dt(info["GrossDT"])
+
+                if info["TareKg"]:
+                    yard[rst]["Tare"] = int(info["TareKg"])
+                    yard[rst]["TareTime"] = parse_dt(info["TareDT"])
+
     mail.logout()
+    print(f"[SCAN] {len(yard)} RST entries built")
+    return yard
 
 
-# ============= MAIN LOOP =============
+def send_realtime_alerts(yard, sent_entry, sent_complete):
+    for rst, d in yard.items():
+        gross = d["Gross"]
+        tare = d["Tare"]
+
+        # ENTRY detection
+        if (gross and not tare) or (tare and not gross):
+            if rst not in sent_entry:
+                in_time = d["GrossTime"] if gross else d["TareTime"]
+                in_type = "Gross" if gross else "Tare"
+                in_wt = gross if gross else tare
+
+                text = (
+                    f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
+                    f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']}\n"
+                    f"IN {format_12h(in_time)} | {in_type}: {in_wt} Kg\n"
+                    f"Pending {'Tare' if gross else 'Gross'}"
+                )
+                send_telegram(text)
+                sent_entry.add(rst)
+                print(f"[ENTRY] Alert sent for RST {rst}")
+
+        # COMPLETION detection
+        if gross and tare:
+            if rst not in sent_complete:
+                in_time = min(d["GrossTime"], d["TareTime"])
+                out_time = max(d["GrossTime"], d["TareTime"])
+                net = abs(gross - tare)
+
+                text = (
+                    f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
+                    f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']}\n"
+                    f"IN {format_12h(in_time)} | OUT {format_12h(out_time)} | NET {net} Kg"
+                )
+                send_telegram(text)
+                sent_complete.add(rst)
+                print(f"[COMPLETE] Alert sent for RST {rst}")
+
+    save_set(SENT_ENTRY, sent_entry)
+    save_set(SENT_COMPLETE, sent_complete)
+
+
+def recover_missed_alerts(yard, sent_complete):
+    for rst, d in yard.items():
+        if d["Gross"] and d["Tare"]:
+            if rst not in sent_complete:
+                in_time = min(d["GrossTime"], d["TareTime"])
+                out_time = max(d["GrossTime"], d["TareTime"])
+                net = abs(d["Gross"] - d["Tare"])
+
+                msg = (
+                    f"⚠️ MISSED ALERT RECOVERED ⚠️\n\n"
+                    f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']}\n"
+                    f"IN {format_12h(in_time)} | OUT {format_12h(out_time)} | NET {net} Kg"
+                )
+                send_telegram(msg)
+                sent_complete.add(rst)
+                print(f"[RECOVERY] Completion recovered for RST {rst}")
+
+    save_set(SENT_COMPLETE, sent_complete)
+
+
+def send_daily_summary(yard):
+    now = now_ist()
+    if now.hour != 10 or now.minute != 0:
+        return
+
+    start = (now - timedelta(days=1)).replace(hour=10, minute=0, second=0)
+    end = now.replace(hour=10, minute=0, second=0)
+
+    msg = f"📊 TODAY’S SUMMARY ({now.strftime('%d-%b %I:%M %p')})\n\n"
+
+    # Completed first
+    for rst, d in yard.items():
+        if d["Gross"] and d["Tare"]:
+            out_time = max(d["GrossTime"], d["TareTime"])
+            if not (start <= out_time <= end):
+                continue
+
+            in_time = min(d["GrossTime"], d["TareTime"])
+            net = abs(d["Gross"] - d["Tare"])
+
+            msg += (
+                f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']} | "
+                f"IN {format_12h(in_time)} | OUT {format_12h(out_time)} | NET {net} Kg\n"
+            )
+
+    # Pending second
+    for rst, d in yard.items():
+        if (d["Gross"] and not d["Tare"]) or (d["Tare"] and not d["Gross"]):
+            in_time = d["GrossTime"] if d["Gross"] else d["TareTime"]
+            pending = "Tare" if d["Gross"] else "Gross"
+
+            msg += (
+                f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']} | "
+                f"IN {format_12h(in_time)} | Pending {pending}\n"
+            )
+
+    send_telegram(msg)
+    print("[SUMMARY] Daily summary sent")
+
 
 if __name__ == "__main__":
     while True:
         try:
-            check_mail()
-            recover_missed_alerts()
-            send_daily_summary()
+            yard = scan_last_50_emails()
+
+            sent_entry = load_set(SENT_ENTRY)
+            sent_complete = load_set(SENT_COMPLETE)
+
+            send_realtime_alerts(yard, sent_entry, sent_complete)
+            recover_missed_alerts(yard, sent_complete)
+            send_daily_summary(yard)
+
         except Exception as e:
-            print("Error:", e)
+            print("[ERR]", e)
+
         time.sleep(30)
