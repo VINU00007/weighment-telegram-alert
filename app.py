@@ -1,3 +1,7 @@
+print("EMAIL_USER:", EMAIL_USER)
+print("EMAIL_PASS:", EMAIL_PASS)
+print("TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
+print("CHAT_ID:", CHAT_ID)
 import imaplib
 import email
 from email.header import decode_header
