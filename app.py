@@ -1,7 +1,3 @@
-print("EMAIL_USER:", EMAIL_USER)
-print("EMAIL_PASS:", EMAIL_PASS)
-print("TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
-print("CHAT_ID:", CHAT_ID)
 import imaplib
 import email
 from email.header import decode_header
@@ -14,14 +10,20 @@ from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
 
+IMAP_SERVER = "imap.gmail.com"
+PROCESSED_FILE = "processed.json"
+
+# ================= LOAD ENV VARS =================
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-IMAP_SERVER = "imap.gmail.com"
-
-PROCESSED_FILE = "processed.json"
+# DEBUG (remove after confirming)
+print("DEBUG EMAIL_USER:", EMAIL_USER)
+print("DEBUG EMAIL_PASS:", EMAIL_PASS)
+print("DEBUG TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
+print("DEBUG CHAT_ID:", CHAT_ID)
 
 
 # ================= TIME =================
@@ -109,7 +111,7 @@ def process_weighment(info):
     tare_dt = parse_dt(info["TareDT"])
     gross_dt = parse_dt(info["GrossDT"])
 
-    # ENTRY-only
+    # ENTRY-ONLY
     if (tare_exists and not gross_exists) or (gross_exists and not tare_exists):
         in_type = "Tare" if tare_exists else "Gross"
         in_weight = info["TareKg"] if tare_exists else info["GrossKg"]
@@ -117,12 +119,12 @@ def process_weighment(info):
         out_type = "Gross" if tare_exists else "Tare"
 
         msg = (
-            "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+            "⚖️ WEIGHMENT ALERT ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
             f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
             f"⚖ {in_type} : {in_weight} Kg\n\n"
-            "⟪ OUT ⟫ Pending final weighment\n"
+            "⟪ OUT ⟫ Pending Final Weighment\n"
             f"⚖ {out_type} : Pending\n\n"
             "🟡 STATUS : VEHICLE ENTERED YARD"
         )
@@ -136,7 +138,7 @@ def process_weighment(info):
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
 
         msg = (
-            "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
+            "⚖️ WEIGHMENT ALERT ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
             f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
@@ -147,7 +149,7 @@ def process_weighment(info):
         send_telegram(msg)
 
 
-# ================= MAIL CHECK (BULLETPROOF) =================
+# ================= CHECK MAIL (BULLETPROOF) =================
 def check_mail():
     # Load processed UIDs
     try:
@@ -162,23 +164,23 @@ def check_mail():
     # Always scan last 20 emails
     result, data = mail.uid("search", None, "ALL")
     all_uids = [int(x) for x in data[0].split()]
-    recent_uids = all_uids[-20:]  # Bulletproof window
+    recent_uids = all_uids[-20:]
 
     for uid in recent_uids:
         if uid in processed:
             continue
 
-        result, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
+        _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
         raw = msg_data[0][1]
         msg = email.message_from_bytes(raw)
 
         subject = safe_decode(msg.get("Subject")).upper()
 
-        # Detect weighment subject
+        # Detect weighment emails
         if not ("WEIGH" in subject or "SLIP" in subject):
             continue
 
-        # Accept ANY PDF type
+        # Extract any PDF
         for part in msg.walk():
             if "pdf" in part.get_content_type():
                 pdf_bytes = part.get_payload(decode=True)
