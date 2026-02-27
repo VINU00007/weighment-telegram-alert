@@ -138,7 +138,7 @@ def process_weighment(info):
         net = abs(int(info["GrossKg"]) - int(info["TareKg"]))
 
         msg = (
-            "⚖️ WEIGHMENT ALERT ⚖️\n\n"
+            "🔥 WEIGHMENT ALERT ⚖️\n\n"
             f"🧾 RST : {rst}   🚛 {info['Vehicle']}\n"
             f"🌾 MATERIAL : {info['Material']}\n\n"
             f"⟪ IN  ⟫ {format_dt(in_time)}\n"
