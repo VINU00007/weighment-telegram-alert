@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import pdfplumber
 
+# -----------------------------
+# ENVIRONMENT VARIABLES
+# -----------------------------
 IMAP_SERVER = "imap.gmail.com"
 
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -17,6 +20,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 
+# -----------------------------
+# TIME HELPERS
+# -----------------------------
 def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
@@ -27,6 +33,9 @@ def format_12h(dt):
     return dt.strftime("%I:%M %p")
 
 
+# -----------------------------
+# TELEGRAM SEND
+# -----------------------------
 def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -35,6 +44,9 @@ def send_telegram(text):
         print("[ERR] Telegram send failed:", e)
 
 
+# -----------------------------
+# EMAIL HELPERS
+# -----------------------------
 def safe_decode(value):
     if not value:
         return ""
@@ -60,15 +72,26 @@ def normalize(s):
 def parse_dt(s):
     if not s:
         return None
-    fmts = ["%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"]
+
+    fmts = [
+        "%d-%b-%y %I:%M:%S %p",
+        "%d-%b-%Y %I:%M:%S %p",
+        "%d-%b-%y %I:%M %p",
+        "%d-%b-%Y %I:%M %p"
+    ]
+
     for f in fmts:
         try:
             return datetime.strptime(s, f)
         except:
             pass
+
     return None
 
 
+# -----------------------------
+# PDF PARSER (FIXED)
+# -----------------------------
 def extract_from_pdf(pdf_bytes):
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -77,22 +100,31 @@ def extract_from_pdf(pdf_bytes):
         print("[ERR] PDF read failure")
         return {}
 
-    dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
+    # DATE PATTERN
+    dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}\s+[AP]M)"
 
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
         "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\- ]+)"),
         "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)"),
         "Material": normalize(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
-        "GrossKg": pick(text, r"Gross\.?:\s*(\d+)"),
-        "TareKg": pick(text, r"Tare\.?:\s*(\d+)"),
+
+        # FIXED GROSS/NET EXTRACTION
+        "GrossKg": pick(text, r"Gross\s*\(.*?\)\s*(\d+)\s*Kgs"),
+        "TareKg": pick(text, r"Tare\s*\(.*?\)\s*(\d+)\s*Kgs"),
+
+        # FIXED DATE EXTRACTION
         "GrossDT": pick(text, r"Gross.*?Kgs.*?" + dt_pat),
         "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
     }
 
 
+# -----------------------------
+# SCAN LAST 50 EMAILS
+# -----------------------------
 def scan_last_50_emails():
     yard = {}
+
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
@@ -114,6 +146,7 @@ def scan_last_50_emails():
             if "pdf" in part.get_content_type():
                 pdf_bytes = part.get_payload(decode=True)
                 info = extract_from_pdf(pdf_bytes)
+
                 if not info or not info.get("RST"):
                     continue
 
@@ -131,10 +164,12 @@ def scan_last_50_emails():
                         "TareTime": None
                     }
 
+                # SAVE GROSS
                 if info["GrossKg"]:
                     yard[rst]["Gross"] = int(info["GrossKg"])
                     yard[rst]["GrossTime"] = parse_dt(info["GrossDT"])
 
+                # SAVE TARE
                 if info["TareKg"]:
                     yard[rst]["Tare"] = int(info["TareKg"])
                     yard[rst]["TareTime"] = parse_dt(info["TareDT"])
@@ -144,46 +179,54 @@ def scan_last_50_emails():
     return yard
 
 
+# -----------------------------
+# SEND ALL ALERTS (TEST MODE)
+# -----------------------------
 def send_all_alerts(yard):
     for rst, d in yard.items():
         gross = d["Gross"]
         tare = d["Tare"]
 
-        # COMPLETED
+        # COMPLETED WEIGHMENT
         if gross and tare:
             in_time = min(d["GrossTime"], d["TareTime"])
             out_time = max(d["GrossTime"], d["TareTime"])
             net = abs(gross - tare)
 
-            text = (
+            msg = (
                 f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
                 f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']}\n"
                 f"IN {format_12h(in_time)} | OUT {format_12h(out_time)} | NET {net} Kg"
             )
-            send_telegram(text)
+
+            send_telegram(msg)
             print(f"[COMPLETE] Sent RST {rst}")
 
-        # ENTRY ONLY
+        # ENTRY WEIGHMENT ONLY
         elif gross or tare:
             in_time = d["GrossTime"] if gross else d["TareTime"]
             in_type = "Gross" if gross else "Tare"
             in_wt = gross if gross else tare
 
-            text = (
+            msg = (
                 f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
                 f"RST {rst} | {d['Vehicle']} | {d['Party']} | {d['Material']}\n"
                 f"IN {format_12h(in_time)} | {in_type}: {in_wt} Kg\n"
                 f"Pending {'Tare' if gross else 'Gross'}"
             )
-            send_telegram(text)
+
+            send_telegram(msg)
             print(f"[ENTRY] Sent RST {rst}")
 
 
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
 if __name__ == "__main__":
     while True:
         try:
             yard = scan_last_50_emails()
-            send_all_alerts(yard)
+            send_all_alerts(yard)   # TEST MODE: Send everything every cycle
         except Exception as e:
             print("[ERR]", e)
 
