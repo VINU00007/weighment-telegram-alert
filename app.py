@@ -9,9 +9,6 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import pdfplumber
 
-# -----------------------------
-# ENVIRONMENT VARIABLES
-# -----------------------------
 IMAP_SERVER = "imap.gmail.com"
 
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -20,12 +17,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 
-# -----------------------------
-# TIME HELPERS
-# -----------------------------
-def now_ist():
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
-
+# ---------------- TIME ---------------- #
 
 def format_12h(dt):
     if not dt:
@@ -33,9 +25,16 @@ def format_12h(dt):
     return dt.strftime("%I:%M %p")
 
 
-# -----------------------------
-# TELEGRAM SEND
-# -----------------------------
+def parse_datetime(date_str, time_str):
+    try:
+        combined = f"{date_str} {time_str}"
+        return datetime.strptime(combined, "%d-%b-%y %I:%M:%S %p")
+    except:
+        return None
+
+
+# ---------------- TELEGRAM ---------------- #
+
 def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -44,20 +43,19 @@ def send_telegram(text):
         print("[ERR] Telegram send failed:", e)
 
 
-# -----------------------------
-# EMAIL HELPERS
-# -----------------------------
+# ---------------- HELPERS ---------------- #
+
 def safe_decode(value):
     if not value:
         return ""
     parts = decode_header(value)
-    out = []
-    for p, enc in parts:
-        if isinstance(p, bytes):
-            out.append(p.decode(enc or "utf-8", errors="replace"))
+    decoded = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(enc or "utf-8", errors="replace"))
         else:
-            out.append(p)
-    return "".join(out)
+            decoded.append(part)
+    return "".join(decoded)
 
 
 def pick(text, pattern):
@@ -65,33 +63,8 @@ def pick(text, pattern):
     return m.group(1).strip() if m else ""
 
 
-def normalize(s):
-    return re.sub(r"\s+", " ", s.strip()) if s else ""
+# ---------------- PDF EXTRACTION (FINAL FIXED) ---------------- #
 
-
-def parse_dt(s):
-    if not s:
-        return None
-
-    fmts = [
-        "%d-%b-%y %I:%M:%S %p",
-        "%d-%b-%Y %I:%M:%S %p",
-        "%d-%b-%y %I:%M %p",
-        "%d-%b-%Y %I:%M %p"
-    ]
-
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f)
-        except:
-            pass
-
-    return None
-
-
-# -----------------------------
-# PDF PARSER (FIXED)
-# -----------------------------
 def extract_from_pdf(pdf_bytes):
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -100,28 +73,37 @@ def extract_from_pdf(pdf_bytes):
         print("[ERR] PDF read failure")
         return {}
 
-    # DATE PATTERN
-    dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}\s+[AP]M)"
+    # Extract weights
+    gross_match = re.search(r"Gross\.\s*:\s*(\d+)\s*Kgs\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(\d{1,2}:\d{2}:\d{2}\s+[AP]M)", text)
+    tare_match  = re.search(r"Tare\.\s*:\s*(\d+)\s*Kgs\s+(\d{1,2}-[A-Za-z]{3}-\d{2})\s+(\d{1,2}:\d{2}:\d{2}\s+[AP]M)", text)
+
+    gross_val = None
+    gross_dt = None
+    tare_val = None
+    tare_dt = None
+
+    if gross_match:
+        gross_val = int(gross_match.group(1))
+        gross_dt = parse_datetime(gross_match.group(2), gross_match.group(3))
+
+    if tare_match:
+        tare_val = int(tare_match.group(1))
+        tare_dt = parse_datetime(tare_match.group(2), tare_match.group(3))
 
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
-        "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\- ]+)"),
-        "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)"),
-        "Material": normalize(pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL")),
-
-        # FIXED GROSS/NET EXTRACTION
-        "GrossKg": pick(text, r"Gross\s*\(.*?\)\s*(\d+)\s*Kgs"),
-        "TareKg": pick(text, r"Tare\s*\(.*?\)\s*(\d+)\s*Kgs"),
-
-        # FIXED DATE EXTRACTION
-        "GrossDT": pick(text, r"Gross.*?Kgs.*?" + dt_pat),
-        "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
+        "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\-]+)"),
+        "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 ]+)"),
+        "Material": pick(text, r"MATERIAL\s*:\s*([A-Za-z0-9 ]+)"),
+        "Gross": gross_val,
+        "GrossTime": gross_dt,
+        "Tare": tare_val,
+        "TareTime": tare_dt
     }
 
 
-# -----------------------------
-# SCAN LAST 50 EMAILS
-# -----------------------------
+# ---------------- EMAIL SCAN ---------------- #
+
 def scan_last_50_emails():
     yard = {}
 
@@ -150,44 +132,21 @@ def scan_last_50_emails():
                 if not info or not info.get("RST"):
                     continue
 
-                rst = info["RST"]
-
-                if rst not in yard:
-                    yard[rst] = {
-                        "RST": rst,
-                        "Vehicle": info["Vehicle"],
-                        "Party": info["Party"],
-                        "Material": info["Material"],
-                        "Gross": None,
-                        "GrossTime": None,
-                        "Tare": None,
-                        "TareTime": None
-                    }
-
-                # SAVE GROSS
-                if info["GrossKg"]:
-                    yard[rst]["Gross"] = int(info["GrossKg"])
-                    yard[rst]["GrossTime"] = parse_dt(info["GrossDT"])
-
-                # SAVE TARE
-                if info["TareKg"]:
-                    yard[rst]["Tare"] = int(info["TareKg"])
-                    yard[rst]["TareTime"] = parse_dt(info["TareDT"])
+                yard[info["RST"]] = info
 
     mail.logout()
     print(f"[SCAN] {len(yard)} RST entries built")
     return yard
 
 
-# -----------------------------
-# SEND ALL ALERTS (TEST MODE)
-# -----------------------------
+# ---------------- ALERT SENDER ---------------- #
+
 def send_all_alerts(yard):
     for rst, d in yard.items():
+
         gross = d["Gross"]
         tare = d["Tare"]
 
-        # COMPLETED WEIGHMENT
         if gross and tare:
             in_time = min(d["GrossTime"], d["TareTime"])
             out_time = max(d["GrossTime"], d["TareTime"])
@@ -202,7 +161,6 @@ def send_all_alerts(yard):
             send_telegram(msg)
             print(f"[COMPLETE] Sent RST {rst}")
 
-        # ENTRY WEIGHMENT ONLY
         elif gross or tare:
             in_time = d["GrossTime"] if gross else d["TareTime"]
             in_type = "Gross" if gross else "Tare"
@@ -219,14 +177,13 @@ def send_all_alerts(yard):
             print(f"[ENTRY] Sent RST {rst}")
 
 
-# -----------------------------
-# MAIN LOOP
-# -----------------------------
+# ---------------- MAIN LOOP ---------------- #
+
 if __name__ == "__main__":
     while True:
         try:
             yard = scan_last_50_emails()
-            send_all_alerts(yard)   # TEST MODE: Send everything every cycle
+            send_all_alerts(yard)
         except Exception as e:
             print("[ERR]", e)
 
