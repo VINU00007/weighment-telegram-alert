@@ -1,80 +1,67 @@
-import os
 import imaplib
 import email
 from email.header import decode_header
+import os
+import time
+import re
 import pdfplumber
 from io import BytesIO
-import re
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    CallbackQueryHandler, ContextTypes
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
 )
 
-# -------------------------------------------------------------------
-# LOAD ENVIRONMENT VARIABLES
-# -------------------------------------------------------------------
-
-load_dotenv()
-
+# =========================================
+# ENV VARS
+# =========================================
 IMAP_SERVER = "imap.gmail.com"
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 BOT_TOKEN  = os.getenv("TELEGRAM_TOKEN")
-ADMIN_ID   = int(os.getenv("CHAT_ID"))
+CHAT_ID    = int(os.getenv("CHAT_ID"))
 
-# -------------------------------------------------------------------
+# =========================================
 # TIME HELPERS
-# -------------------------------------------------------------------
-
+# =========================================
 def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
-def format_dt(dt):
+def f12(dt):
     if not dt:
-        return "N/A"
-    return dt.strftime("%d-%b-%Y | %I:%M %p")
+        return "—"
+    return dt.strftime("%d-%b %I:%M %p")
 
-# -------------------------------------------------------------------
-# EMAIL/ PDF HELPERS
-# -------------------------------------------------------------------
-
+# =========================================
+# TEXT PARSING HELPERS
+# =========================================
 def safe_decode(v):
     if not v:
         return ""
     parts = decode_header(v)
-    decoded = []
+    out = []
     for p, enc in parts:
         if isinstance(p, bytes):
-            decoded.append(p.decode(enc or "utf-8", errors="replace"))
+            out.append(p.decode(enc or "utf-8", errors="ignore"))
         else:
-            decoded.append(p)
-    return "".join(decoded)
+            out.append(p)
+    return "".join(out)
 
 def pick(text, pattern):
-    m = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+    m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ""
 
-def clean_material(m):
-    if not m:
-        return ""
-    m = m.replace("CELL", "").replace("NO", "")
-    return re.sub(r"\s+", " ", m).strip()
-
-def parse_dt(s):
-    if not s:
-        return None
-    fmts = ["%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"]
-    for f in fmts:
-        try:
-            return datetime.strptime(s, f)
-        except:
-            pass
-    return None
-
+# =========================================
+# PDF PARSE
+# =========================================
 def extract_from_pdf(pdf_bytes):
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -84,25 +71,31 @@ def extract_from_pdf(pdf_bytes):
 
     dt_pat = r"(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)"
 
-    material = pick(text, r"MATERIAL\s*:\s*(.+?)\s+(?:CELL|NO|$)")
-    material = clean_material(material)
-
     return {
         "RST": pick(text, r"RST\s*:\s*(\d+)"),
         "Vehicle": pick(text, r"Vehicle\s*No\s*:\s*([A-Z0-9\- ]+)"),
         "Party": pick(text, r"PARTY\s*NAME\s*[:\-]?\s*([A-Za-z0-9 &\.\-]+)"),
-        "Material": material,
-        "GrossKg": pick(text, r"Gross\.?:\s*(\d+)"),
-        "TareKg": pick(text, r"Tare\.?:\s*(\d+)"),
+        "Material": pick(text, r"MATERIAL\s*:\s*(.+?)\s+CELL"),
+        "Gross": pick(text, r"Gross.*?:\s*(\d+)"),
+        "Tare": pick(text, r"Tare.*?:\s*(\d+)"),
         "GrossDT": pick(text, r"Gross.*?Kgs.*?" + dt_pat),
         "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
     }
 
-# -------------------------------------------------------------------
-# EMAIL SCANNING
-# -------------------------------------------------------------------
+def parse_dt(s):
+    if not s:
+        return None
+    for f in ["%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"]:
+        try:
+            return datetime.strptime(s, f)
+        except:
+            pass
+    return None
 
-def scan_email_latest():
+# =========================================
+# SCAN EMAIL
+# =========================================
+def scan_mails(limit=200):
     yard = {}
 
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -110,93 +103,208 @@ def scan_email_latest():
     mail.select("inbox")
 
     _, data = mail.uid("search", None, "ALL")
-    uids = data[0].split()
-    if not uids:
-        return {}
+    uids = [int(x) for x in data[0].split()]
+    selected = uids[-limit:]
 
-    for uid in uids[-30:]:   # last 30 mails
-        _, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        msg = email.message_from_bytes(msg_data[0][1])
+    for uid in selected:
+        _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
+        raw = msg_data[0][1]
+        msg = email.message_from_bytes(raw)
 
-        subject = safe_decode(msg.get("Subject")).upper()
-        if "WEIGH" not in subject and "SLIP" not in subject:
+        sub = safe_decode(msg.get("Subject")).upper()
+        if "WEIGH" not in sub and "SLIP" not in sub:
             continue
 
         for part in msg.walk():
             if "pdf" in part.get_content_type():
-                info = extract_from_pdf(part.get_payload(decode=True))
+                pdf_bytes = part.get_payload(decode=True)
+                info = extract_from_pdf(pdf_bytes)
                 if not info or not info.get("RST"):
                     continue
 
                 rst = info["RST"]
-                yard[rst] = info
+                if rst not in yard:
+                    yard[rst] = {
+                        "RST": rst,
+                        "Vehicle": info["Vehicle"],
+                        "Party": info["Party"],
+                        "Material": info["Material"],
+                        "Gross": None,
+                        "GrossDT": None,
+                        "Tare": None,
+                        "TareDT": None
+                    }
+
+                if info["Gross"]:
+                    yard[rst]["Gross"] = int(info["Gross"])
+                    yard[rst]["GrossDT"] = parse_dt(info["GrossDT"])
+
+                if info["Tare"]:
+                    yard[rst]["Tare"] = int(info["Tare"])
+                    yard[rst]["TareDT"] = parse_dt(info["TareDT"])
 
     mail.logout()
     return yard
 
-# -------------------------------------------------------------------
-# TELEGRAM BOT HANDLERS
-# -------------------------------------------------------------------
+# =========================================
+# MESSAGE GENERATORS
+# =========================================
+def full_menu():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 Latest Weighments", callback_data="latest"),
+            InlineKeyboardButton("📊 Completed Today", callback_data="completed")
+        ],
+        [
+            InlineKeyboardButton("🏭 Vehicles Inside", callback_data="inside"),
+            InlineKeyboardButton("🔍 Search RST", callback_data="search_rst")
+        ],
+        [
+            InlineKeyboardButton("🔄 Yard Summary (24h)", callback_data="summary")
+        ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="help")
+        ]
+    ])
 
+# =========================================
+# BOT COMMANDS
+# =========================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("📥 Scan Latest Slips", callback_data="scan")],
-        [InlineKeyboardButton("ℹ️ Help", callback_data="help")]
-    ]
-    reply = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
-        "👋 Hello Vinu!\nYour Rice Mill Telegram Assistant is ready.\n\nChoose an option:",
-        reply_markup=reply
+        "👋 Welcome Vinu!\nChoose an option below:",
+        reply_markup=full_menu()
     )
 
+async def help_btn(update: Update, context):
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text(
+        "ℹ️ Choose any option:",
+        reply_markup=full_menu()
+    )
+
+# =========================================
+# CALLBACK HANDLERS
+# =========================================
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # prevents timeout
 
-    if update.effective_chat.id != ADMIN_ID:
-        return
+    data = query.data
+    yard = scan_mails()
 
-    if query.data == "scan":
-        yard = scan_email_latest()
-        if not yard:
-            await query.edit_message_text("No weighment slips found in last 30 mails.")
-            return
-
+    # --------------------------------------
+    # LATEST
+    # --------------------------------------
+    if data == "latest":
         msg = "📥 *Latest Weighment Slips Found:*\n\n"
-        for rst, d in yard.items():
+        for rst, d in list(yard.items())[-5:][::-1]:
             msg += (
-                f"📌 *RST {rst}*\n"
+                f"📌 RST {rst}\n"
                 f"🚛 {d['Vehicle']}\n"
                 f"🌾 {d['Material']}\n"
-                f"⚖ Gross: {d['GrossKg']} | Tare: {d['TareKg']}\n\n"
+                f"⚖ Gross: {d['Gross'] or '—'} | Tare: {d['Tare'] or '—'}\n\n"
+            )
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=full_menu())
+        return
+
+    # --------------------------------------
+    # COMPLETED
+    # --------------------------------------
+    if data == "completed":
+        msg = "📊 *Completed Today*\n\n"
+        today = now_ist().date()
+        for rst, d in yard.items():
+            if d["Gross"] and d["Tare"]:
+                t1 = d["GrossDT"] or d["TareDT"]
+                if t1 and t1.date() == today:
+                    net = abs(d["Gross"] - d["Tare"])
+                    msg += (
+                        f"RST {rst} | {d['Vehicle']} | NET {net} Kg\n"
+                    )
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=full_menu())
+        return
+
+    # --------------------------------------
+    # INSIDE
+    # --------------------------------------
+    if data == "inside":
+        msg = "🏭 *Vehicles Inside Yard*\n\n"
+        for rst, d in yard.items():
+            if (d["Gross"] and not d["Tare"]) or (d["Tare"] and not d["Gross"]):
+                msg += f"RST {rst} – {d['Vehicle']} – {d['Material']}\n"
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=full_menu())
+        return
+
+    # --------------------------------------
+    # SUMMARY (24h)
+    # --------------------------------------
+    if data == "summary":
+        msg = "🔄 *24-Hour Yard Summary*\n\n"
+        cutoff = now_ist() - timedelta(hours=24)
+        for rst, d in yard.items():
+            tmax = d["GrossDT"] or d["TareDT"]
+            if tmax and tmax >= cutoff:
+                msg += f"{rst} | {d['Vehicle']} | {d['Material']}\n"
+        await query.message.reply_text(msg, parse_mode="Markdown", reply_markup=full_menu())
+        return
+
+    # --------------------------------------
+    # SEARCH RST
+    # --------------------------------------
+    if data == "search_rst":
+        context.user_data["mode"] = "search"
+        await query.message.reply_text("🔍 Send the *RST Number*:")
+        return
+
+# =========================================
+# TEXT INPUT HANDLER (search)
+# =========================================
+async def text_handler(update: Update, context):
+    if context.user_data.get("mode") == "search":
+        rst = update.message.text.strip()
+        yard = scan_mails()
+        if rst not in yard:
+            await update.message.reply_text("❌ RST not found.", reply_markup=full_menu())
+        else:
+            d = yard[rst]
+
+            # yard duration
+            t1 = d["GrossDT"] or d["TareDT"]
+            t2 = d["TareDT"] if d["GrossDT"] else d["GrossDT"]
+            duration = ""
+            if t1 and t2:
+                diff = t2 - t1
+                duration = f"{diff.seconds//3600}h {(diff.seconds//60)%60}m"
+
+            msg = (
+                f"📌 *RST {rst}*\n"
+                f"🚛 {d['Vehicle']}\n"
+                f"🌾 {d['Material']}\n\n"
+                f"Gross: {d['Gross'] or '—'} ({f12(d['GrossDT'])})\n"
+                f"Tare: {d['Tare'] or '—'} ({f12(d['TareDT'])})\n\n"
+                f"⏱ Yard Time: {duration or '—'}"
             )
 
-        await query.edit_message_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=full_menu())
 
-    elif query.data == "help":
-        await query.edit_message_text(
-            "🆘 *Help Menu*\n\n"
-            "• Press 'Scan Latest Slips' to fetch weight slips.\n"
-            "• I will later add options like search by RST, vehicle, date etc.",
-            parse_mode="Markdown"
-        )
+        context.user_data["mode"] = None
+        return
 
-# -------------------------------------------------------------------
-# RUN BOT
-# -------------------------------------------------------------------
-
-def main():
+# =========================================
+# MAIN
+# =========================================
+if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_buttons))
+    app.add_handler(MessageHandler := CommandHandler("help", help_btn))
+    app.add_handler(CallbackQueryHandler(help_btn, pattern="help"))
+    app.add_handler(CommandHandler("help", help_btn))
+    from telegram.ext import MessageHandler, filters
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("BOT RUNNING...")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
