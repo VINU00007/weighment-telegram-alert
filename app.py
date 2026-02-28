@@ -19,35 +19,34 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 SENT_ENTRY = "SentEntryRSTs.json"
 SENT_COMPLETE = "SentCompletionRSTs.json"
-LAST_HOURLY = "LastHourly.txt"
-
 
 # ---------------------------------------------------------
 # TIME HELPERS
 # ---------------------------------------------------------
+
 def now_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
 def format_12h(dt):
     if not dt:
         return "Time N/A"
-    return dt.strftime("%I:%M %p")
-
+    return dt.strftime("%d-%b-%y | %I:%M %p")
 
 # ---------------------------------------------------------
-# TELEGRAM
+# TELEGRAM SEND
 # ---------------------------------------------------------
+
 def send_telegram(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": text})
     except Exception as e:
-        print("[ERR] Telegram failed:", e)
-
+        print("[ERR] Telegram send failed:", e)
 
 # ---------------------------------------------------------
-# HELPERS
+# TEXT HELPERS
 # ---------------------------------------------------------
+
 def safe_decode(value):
     if not value:
         return ""
@@ -74,10 +73,17 @@ def clean_material(m):
     m = m.replace("NO", "")
     return normalize(m)
 
+# ---------------------------------------------------------
+# DATE PARSER
+# ---------------------------------------------------------
+
 def parse_dt(s):
     if not s:
         return None
-    fmts = ["%d-%b-%y %I:%M:%S %p", "%d-%b-%Y %I:%M:%S %p"]
+    fmts = [
+        "%d-%b-%y %I:%M:%S %p",
+        "%d-%b-%Y %I:%M:%S %p"
+    ]
     for f in fmts:
         try:
             return datetime.strptime(s, f)
@@ -85,10 +91,10 @@ def parse_dt(s):
             pass
     return None
 
+# ---------------------------------------------------------
+# PDF EXTRACTOR
+# ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# PDF PARSER
-# ---------------------------------------------------------
 def extract_from_pdf(pdf_bytes):
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
@@ -113,11 +119,11 @@ def extract_from_pdf(pdf_bytes):
         "TareDT": pick(text, r"Tare.*?Kgs.*?" + dt_pat)
     }
 
+# ---------------------------------------------------------
+# EMAIL SCANNER (LAST 200 EMAILS)
+# ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# EMAIL SCAN
-# ---------------------------------------------------------
-def scan_last_50_emails():
+def scan_last_200_emails():
     yard = {}
 
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -126,7 +132,9 @@ def scan_last_50_emails():
 
     _, data = mail.uid("search", None, "ALL")
     uids = [int(x) for x in data[0].split()]
-    recent = uids[-50:]
+
+    # Scan last 200 emails
+    recent = uids[-200:]
 
     for uid in recent:
         _, msg_data = mail.uid("fetch", str(uid), "(RFC822)")
@@ -134,6 +142,7 @@ def scan_last_50_emails():
         msg = email.message_from_bytes(raw)
 
         subject = safe_decode(msg.get("Subject")).upper()
+
         if "WEIGH" not in subject and "SLIP" not in subject:
             continue
 
@@ -167,13 +176,13 @@ def scan_last_50_emails():
                     yard[rst]["TareTime"] = parse_dt(info["TareDT"])
 
     mail.logout()
-    print(f"[SCAN] {len(yard)} entries built")
+    print(f"[SCAN] {len(yard)} RST entries built")
     return yard
 
+# ---------------------------------------------------------
+# LOAD/SAVE SENT FILES
+# ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# MEMORY
-# ---------------------------------------------------------
 def load_set(file):
     if not os.path.exists(file):
         return set()
@@ -185,25 +194,27 @@ def load_set(file):
 def save_set(file, data):
     json.dump(list(data), open(file, "w"), indent=2)
 
-
 # ---------------------------------------------------------
 # REALTIME ALERTS
 # ---------------------------------------------------------
+
 def send_realtime_alerts(yard, sent_entry, sent_complete):
 
     for rst, d in yard.items():
-        g  = d["Gross"]
-        t  = d["Tare"]
-        gt = d["GrossTime"]
-        tt = d["TareTime"]
+        gross = d["Gross"]
+        tare = d["Tare"]
+
+        gross_t = d["GrossTime"]
+        tare_t = d["TareTime"]
 
         # ENTRY ALERT
-        if (g and not t) or (t and not g):
+        if (gross and not tare) or (tare and not gross):
+
             if rst not in sent_entry:
 
-                first_w = g if g else t
-                first_t = gt if g else tt
-                ftype   = "Gross" if g else "Tare"
+                in_wt = gross if gross else tare
+                in_time = gross_t if gross else tare_t
+                in_type = "Gross" if gross else "Tare"
 
                 msg = (
                     f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
@@ -211,8 +222,8 @@ def send_realtime_alerts(yard, sent_entry, sent_complete):
                     f"🏭 PARTY : {d['Party']}\n"
                     f"🌾 MATERIAL : {d['Material']}\n\n"
                     f"《 FIRST WEIGHMENT 》\n"
-                    f"⚖ {ftype} : {first_w} Kg\n"
-                    f"🕒 {format_12h(first_t)}\n\n"
+                    f"⚖ {in_type} : {in_wt} Kg\n"
+                    f"🕒 {format_12h(in_time)}\n\n"
                     f"《 SECOND WEIGHMENT 》 Pending\n"
                     f"⚖ Gross/Tare : Pending\n\n"
                     f"🟡 STATUS : VEHICLE INSIDE YARD"
@@ -220,112 +231,93 @@ def send_realtime_alerts(yard, sent_entry, sent_complete):
 
                 send_telegram(msg)
                 sent_entry.add(rst)
-                continue
+                print(f"[ENTRY] Sent RST {rst}")
 
         # COMPLETION ALERT
-        if g and t and rst not in sent_complete:
+        if gross and tare:
 
-            times = []
-            if tt: times.append(("Tare", t, tt))
-            if gt: times.append(("Gross", g, gt))
-            times = [x for x in times if x[2]]
+            if rst not in sent_complete:
 
-            if len(times) < 2:
-                continue
+                times = []
+                if tare_t:  times.append(("Tare", tare, tare_t))
+                if gross_t: times.append(("Gross", gross, gross_t))
+                times = [t for t in times if t[2] is not None]
 
-            times.sort(key=lambda x: x[2])
-            (t1type, t1w, t1t), (t2type, t2w, t2t) = times
+                if len(times) < 2:
+                    continue
 
-            net = abs(g - t)
+                times.sort(key=lambda x: x[2])
 
-            msg = (
-                f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
-                f"🧾 RST : {rst}   🚛 {d['Vehicle']}\n"
-                f"🏭 PARTY : {d['Party']}\n"
-                f"🌾 MATERIAL : {d['Material']}\n\n"
-                f"⟪ YARD IN  ⟫ {format_12h(t1t)} | {t1type} {t1w} Kg\n"
-                f"⟪ YARD OUT ⟫ {format_12h(t2t)} | {t2type} {t2w} Kg\n\n"
-                f"🔵 NET LOAD : {net} Kg\n"
-                f"🟢 STATUS : WEIGHMENT COMPLETED"
-            )
+                (_, first_wt, t1), (_, second_wt, t2) = times
+                net = abs(gross - tare)
 
-            send_telegram(msg)
-            sent_complete.add(rst)
+                msg = (
+                    f"⚖️ WEIGHMENT ALERT ⚖️\n\n"
+                    f"🧾 RST : {rst}   🚛 {d['Vehicle']}\n"
+                    f"🏭 PARTY : {d['Party']}\n"
+                    f"🌾 MATERIAL : {d['Material']}\n\n"
+                    f"⟪ IN  ⟫ {format_12h(t1)}\n"
+                    f"⚖ First : {first_wt} Kg\n\n"
+                    f"⟪ OUT ⟫ {format_12h(t2)}\n"
+                    f"⚖ Second : {second_wt} Kg\n\n"
+                    f"🔵 NET LOAD : {net} Kg\n"
+                    f"🟢 STATUS : WEIGHMENT COMPLETED"
+                )
+
+                send_telegram(msg)
+                sent_complete.add(rst)
+                print(f"[COMPLETE] Sent RST {rst}")
 
     save_set(SENT_ENTRY, sent_entry)
     save_set(SENT_COMPLETE, sent_complete)
 
+# ---------------------------------------------------------
+# HOURLY SUMMARY
+# ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# HOURLY SUMMARY (EVERY :00)
-# ---------------------------------------------------------
 def send_hourly_summary(yard):
     now = now_ist()
-
-    # Run only at minute 0
-    if now.minute != 0:
+    if now.minute != 0:  # only at the top of the hour
         return
 
-    # Prevent duplicate summary within same hour
-    hour_key = now.strftime("%Y-%m-%d %H")
-    if os.path.exists(LAST_HOURLY):
-        last = open(LAST_HOURLY).read().strip()
-        if last == hour_key:
-            return
+    start = now - timedelta(hours=1)
+    end = now
 
-    open(LAST_HOURLY, "w").write(hour_key)
+    msg = f"📊 HOURLY SUMMARY ({start.strftime('%I:%M %p')} - {end.strftime('%I:%M %p')})\n\n"
 
-    msg = "📊 HOURLY SUMMARY (Last 24 Hours)\n\n"
-
-    start = now - timedelta(hours=24)
-    COMPLETED = []
-    PENDING = []
+    found = False
 
     for rst, d in yard.items():
-        g, t = d["Gross"], d["Tare"]
-        gt, tt = d["GrossTime"], d["TareTime"]
+        times = [t for t in [d["GrossTime"], d["TareTime"]] if t]
 
-        # Completed
-        if g and t:
-            times = [x for x in [gt, tt] if x]
-            if len(times) == 2:
-                IN, OUT = min(times), max(times)
-                if IN >= start:
-                    net = abs(g - t)
-                    COMPLETED.append(
-                        f"RST {rst} | {d['Vehicle']} | {d['Material']}\n"
-                        f"YARD IN {format_12h(IN)} | YARD OUT {format_12h(OUT)} | NET {net} Kg\n"
-                    )
+        if not times:
+            continue
 
-        # Pending
-        if (g and not t) or (t and not g):
-            first_t = gt if g else tt
-            ptype = "Gross" if t else "Tare"
-            if first_t and first_t >= start:
-                PENDING.append(
-                    f"RST {rst} | {d['Vehicle']} | {d['Material']}\n"
-                    f"YARD IN {format_12h(first_t)} | Pending {ptype}\n"
-                )
+        tmax = max(times)
 
-    if COMPLETED:
-        msg += "✔ COMPLETED\n" + "\n".join(COMPLETED) + "\n"
+        if start <= tmax <= end:
+            found = True
+            net = abs((d["Gross"] or 0) - (d["Tare"] or 0))
 
-    if PENDING:
-        msg += "🟡 PENDING\n" + "\n".join(PENDING)
+            msg += (
+                f"{rst} | {d['Vehicle']} | {d['Party']} | {d['Material']} | "
+                f"IN {format_12h(min(times))} | OUT {format_12h(max(times))} | NET {net} Kg\n"
+            )
 
-    if not COMPLETED and not PENDING:
-        msg += "No weighments in the last 24 hours."
+    if not found:
+        msg += "No weighments in this hour."
 
     send_telegram(msg)
-
+    print("[HOURLY] Summary sent")
 
 # ---------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------
+
 if __name__ == "__main__":
     while True:
         try:
-            yard = scan_last_50_emails()
+            yard = scan_last_200_emails()
 
             sent_entry = load_set(SENT_ENTRY)
             sent_complete = load_set(SENT_COMPLETE)
