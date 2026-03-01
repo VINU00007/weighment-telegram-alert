@@ -10,7 +10,7 @@ IMAP_HOST = "imap.gmail.com"
 IMAP_USER = "your-email@gmail.com"
 IMAP_PASS = "your-app-password"
 
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = "8502486259:AAEI6w8aRyZHdElO82J_DmV9xGpdmMgjcZ0"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
