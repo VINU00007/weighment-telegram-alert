@@ -3,39 +3,36 @@ import email
 import imaplib
 import os
 import re
-from email.header import decode_header
+import io
 import PyPDF2
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# -------------------------------------------------------------------
-# ENVIRONMENT VARIABLES (Railway)
-# -------------------------------------------------------------------
+# ----------------------------
+# ENV VARIABLES
+# ----------------------------
 IMAP_USER = os.getenv("EMAIL_USER")
 IMAP_PASS = os.getenv("EMAIL_PASS")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")    # unused now but keep for future
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# -------------------------------------------------------------------
-# PDF PARSER HELPERS
-# -------------------------------------------------------------------
-def parse_field(text, label):
-    """Extract field from PDF text."""
+# ----------------------------
+# PDF PARSER
+# ----------------------------
+def extract_field(text, label):
     try:
-        # Example: RST No: 139
         pattern = rf"{label}\s*[:\- ]\s*([A-Za-z0-9 \/]+)"
-        match = re.search(pattern, text, re.IGNORECASE)
-        return match.group(1).strip() if match else "-"
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else "-"
     except:
         return "-"
 
 
 def extract_pdf_text(msg):
-    """Extract text from attached PDF."""
+    """Return text from attached PDF file."""
     for part in msg.walk():
         if part.get_content_type() == "application/pdf":
             pdf_bytes = part.get_payload(decode=True)
@@ -48,43 +45,45 @@ def extract_pdf_text(msg):
                 for page in reader.pages:
                     text += page.extract_text() + "\n"
                 return text
-            except Exception as e:
+            except:
                 return None
     return None
 
 
-# -------------------------------------------------------------------
-# FETCH LATEST PDF WEIGHMENT SLIPS
-# -------------------------------------------------------------------
+# ----------------------------
+# FETCH LATEST PDF SLIPS
+# ----------------------------
 def fetch_latest(limit=10):
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
         mail.login(IMAP_USER, IMAP_PASS)
         mail.select("inbox")
 
-        _, data = mail.search(None, '(SUBJECT "Weighment Slip")')
+        # Search ALL emails (no subject filter)
+        _, data = mail.search(None, "ALL")
         ids = data[0].split()
 
         slips = []
 
-        for msg_id in ids[-limit:]:
-            _, msg_data = mail.fetch(msg_id, "(RFC822)")
-            msg = email.message_from_bytes(msg_data[0][1])
+        for msg_id in ids[::-1][:limit]:  # reverse for latest first
+            _, raw = mail.fetch(msg_id, "(RFC822)")
+            msg = email.message_from_bytes(raw[0][1])
 
             pdf_text = extract_pdf_text(msg)
             if not pdf_text:
                 continue
 
             slip = {
-                "rst": parse_field(pdf_text, "RST"),
-                "vehicle": parse_field(pdf_text, "Vehicle"),
-                "party": parse_field(pdf_text, "Party"),
-                "place": parse_field(pdf_text, "Place"),
-                "material": parse_field(pdf_text, "Material"),
-                "gross": parse_field(pdf_text, "Gross"),
-                "tare": parse_field(pdf_text, "Tare"),
-                "time": parse_field(pdf_text, "Date"),
+                "rst": extract_field(pdf_text, "RST"),
+                "vehicle": extract_field(pdf_text, "Vehicle"),
+                "party": extract_field(pdf_text, "Party"),
+                "place": extract_field(pdf_text, "Place"),
+                "material": extract_field(pdf_text, "Material"),
+                "gross": extract_field(pdf_text, "Gross"),
+                "tare": extract_field(pdf_text, "Tare"),
+                "time": extract_field(pdf_text, "Date"),
             }
+
             slips.append(slip)
 
         return slips
@@ -93,31 +92,29 @@ def fetch_latest(limit=10):
         return [{"error": f"IMAP error: {str(e)}"}]
 
 
-# -------------------------------------------------------------------
-# TELEGRAM BOT UI
-# -------------------------------------------------------------------
+# ----------------------------
+# BOT UI
+# ----------------------------
 @dp.message(CommandStart())
 async def start(message: types.Message):
     kb = InlineKeyboardBuilder()
     kb.button(text="📥 Latest Weighments", callback_data="latest")
-    kb.button(text="❓ Help", callback_data="help")
     kb.adjust(1)
 
     await message.answer(
-        "👋 Welcome Vinu!\nChoose an option:",
+        "👋 Welcome Vinu!\nTap below to view latest weighment slips:",
         reply_markup=kb.as_markup()
     )
 
 
 @dp.callback_query(lambda c: c.data == "latest")
-async def callback_latest(query: types.CallbackQuery):
+async def latest_slips(query: types.CallbackQuery):
     slips = fetch_latest()
 
     if not slips:
         await query.message.edit_text("⚠ No weighment slips found.")
         return
 
-    # If IMAP returned an error
     if "error" in slips[0]:
         await query.message.edit_text(f"⚠ Error: {slips[0]['error']}")
         return
@@ -139,21 +136,11 @@ async def callback_latest(query: types.CallbackQuery):
     await query.answer()
 
 
-@dp.callback_query(lambda c: c.data == "help")
-async def callback_help(query: types.CallbackQuery):
-    await query.message.edit_text(
-        "❓ *Help*\n"
-        "Use *Latest Weighments* to view the most recent weighment slips.",
-        parse_mode="Markdown"
-    )
-    await query.answer()
-
-
-# -------------------------------------------------------------------
+# ----------------------------
 # START BOT
-# -------------------------------------------------------------------
+# ----------------------------
 async def main():
-    print("BOT RUNNING → Aiogram 3.x stable on Railway")
+    print("BOT RUNNING — PDF READER ACTIVE")
     await dp.start_polling(bot)
 
 
