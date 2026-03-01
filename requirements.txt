@@ -3,3 +3,4 @@ pdfplumber
 PyPDF2
 requests
 python-dotenv
+aiogram==3.4.1
