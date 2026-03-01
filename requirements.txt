@@ -4,3 +4,4 @@ python-dotenv
 aiogram==3.4.1
 pdfplumber==0.10.3
 PyMuPDF==1.23.7
+Pypdf2
