@@ -3,9 +3,15 @@ import imaplib
 import email
 from email.header import decode_header
 import re
-from aiogram import Bot, Dispatcher, types
+
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# -----------------------------
+# CONFIG
+# -----------------------------
 IMAP_HOST = "imap.gmail.com"
 IMAP_USER = "your-email@gmail.com"
 IMAP_PASS = "your-app-password"
@@ -15,9 +21,8 @@ BOT_TOKEN = "8502486259:AAEI6w8aRyZHdElO82J_DmV9xGpdmMgjcZ0"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-
 # -----------------------------
-# MAIL PARSING
+# PARSING
 # -----------------------------
 def parse_rst(text):
     def grab(pat):
@@ -26,11 +31,11 @@ def parse_rst(text):
 
     return {
         "rst": grab(r"RST\s*[:\- ]\s*(\d+)"),
-        "vehicle": grab(r"Vehicle\s*[:\- ]\s*([A-Z0-9]+)"),
-        "material": grab(r"Material\s*[:\- ]\s*([A-Za-z ]+)"),
+        "vehicle": grab(r"Vehicle\s*[:\- ]\s*([A-Z0-9\-]+)"),
+        "material": grab(r"Material\s*[:\- ]\s*([A-Za-z0-9 \-]+)"),
         "gross": grab(r"Gross\s*[:\- ]\s*(\d+)"),
         "tare": grab(r"Tare\s*[:\- ]\s*(\d+)"),
-        "date": grab(r"Date\s*[:\- ]\s*([0-9\-: ]+)"),
+        "date": grab(r"Date\s*[:\- ]\s*([0-9\-: ]+)")
     }
 
 
@@ -49,35 +54,38 @@ def fetch_latest(limit=10):
             msg = email.message_from_bytes(msg_data[0][1])
 
             text = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        text += part.get_payload(decode=True).decode("utf-8", errors="ignore")
-            else:
-                text += msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        text += payload.decode("utf-8", errors="ignore")
 
             slips.append(parse_rst(text))
 
         return slips
+
     except Exception as e:
         return [{"error": str(e)}]
 
+# -----------------------------
+# HANDLERS
+# -----------------------------
 
-# -----------------------------
-# BOT UI
-# -----------------------------
-@dp.message(commands=["start"])
-async def start(message: types.Message):
+@dp.message(CommandStart())
+async def start(message: Message):
     kb = InlineKeyboardBuilder()
     kb.button(text="📥 Latest Weighments", callback_data="latest")
     kb.button(text="❓ Help", callback_data="help")
     kb.adjust(1)
 
-    await message.answer("👋 Welcome Vinu!\nChoose an option:", reply_markup=kb.as_markup())
+    await message.answer(
+        "👋 Welcome Vinu!\nChoose an option:",
+        reply_markup=kb.as_markup()
+    )
 
 
-@dp.callback_query(lambda c: c.data == "latest")
-async def cb_latest(query: types.CallbackQuery):
+@dp.callback_query(lambda q: q.data == "latest")
+async def callback_latest(query: CallbackQuery):
     slips = fetch_latest()
 
     msg = "📥 *Latest Weighment Slips*\n\n"
@@ -94,20 +102,22 @@ async def cb_latest(query: types.CallbackQuery):
     await query.answer()
 
 
-@dp.callback_query(lambda c: c.data == "help")
-async def cb_help(query: types.CallbackQuery):
+@dp.callback_query(lambda q: q.data == "help")
+async def callback_help(query: CallbackQuery):
     await query.message.edit_text(
-        "❓ Help:\nClick Latest to view weighments.\n",
+        "❓ *HELP*\n\n"
+        "• Tap *Latest Weighments* to see the newest slips.\n"
+        "• Bot auto-fetches the last 10 weighment mails.\n",
         parse_mode="Markdown"
     )
     await query.answer()
 
 
 # -----------------------------
-# MAIN
+# MAIN LOOP
 # -----------------------------
 async def main():
-    print("BOT RUNNING (aiogram, stable on Railway)...")
+    print("BOT RUNNING → Aiogram 3.x stable on Railway")
     await dp.start_polling(bot)
 
 
