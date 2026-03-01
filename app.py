@@ -1,21 +1,19 @@
 import asyncio
 import imaplib
 import email
-import os
-import pdfplumber
+import re
 from email.header import decode_header
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram import Bot, Dispatcher, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+import os
 
-
-# ======================================================
-# CONFIG (from Railway environment variables)
-# ======================================================
-IMAP_HOST = "imap.gmail.com"
-IMAP_USER = os.getenv("IMAP_USER")
-IMAP_PASS = os.getenv("IMAP_PASS")
+# -----------------------------
+# READ FROM RAILWAY VARIABLES
+# -----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+IMAP_HOST = "imap.gmail.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
