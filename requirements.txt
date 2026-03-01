@@ -4,3 +4,4 @@ PyPDF2
 requests
 python-dotenv
 aiogram==3.4.1
+pypdf2==3.0.1
