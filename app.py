@@ -1,146 +1,151 @@
-import asyncio
-import email
-import imaplib
 import os
-import re
-import io
-import PyPDF2
+import asyncio
+import imaplib
+import email
+import fitz  # PyMuPDF
+import easyocr
+import numpy as np
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ----------------------------
-# ENV VARIABLES
-# ----------------------------
-IMAP_USER = os.getenv("EMAIL_USER")
-IMAP_PASS = os.getenv("EMAIL_PASS")
+# Load env variables
+load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+
+IMAP_HOST = "imap.gmail.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ----------------------------
-# PDF PARSER
-# ----------------------------
-def extract_field(text, label):
-    try:
-        pattern = rf"{label}\s*[:\- ]\s*([A-Za-z0-9 \/]+)"
+reader = easyocr.Reader(["en"], gpu=False)
+
+
+# --------------------------------------------------
+# OCR extract from PDF
+# --------------------------------------------------
+def ocr_extract_text_from_pdf(path):
+    text = ""
+    doc = fitz.open(path)
+
+    for page in doc:
+        pix = page.get_pixmap(dpi=200)
+        img_np = np.frombuffer(pix.samples, dtype=np.uint8)
+        img_np = img_np.reshape(pix.height, pix.width, pix.n)
+
+        result = reader.readtext(img_np, detail=0, paragraph=True)
+        text += "\n".join(result) + "\n"
+
+    return text
+
+
+# --------------------------------------------------
+# Parse OCR text
+# --------------------------------------------------
+def parse_fields(text):
+    def g(pattern):
+        import re
         m = re.search(pattern, text, re.IGNORECASE)
         return m.group(1).strip() if m else "-"
-    except:
-        return "-"
+
+    return {
+        "rst": g(r"RST[:\- ]+(\d+)"),
+        "vehicle": g(r"(TS|AP|CG|OD|MH)[0-9A-Z ]+"),
+        "party": g(r"Party[:\- ]+([A-Za-z0-9 .]+)"),
+        "place": g(r"Place[:\- ]+([A-Za-z0-9 .]+)"),
+        "material": g(r"Material[:\- ]+([A-Za-z0-9 .]+)"),
+        "gross": g(r"Gross[:\- ]+(\d+)"),
+        "tare": g(r"Tare[:\- ]+(\d+)"),
+    }
 
 
-def extract_pdf_text(msg):
-    """Return text from attached PDF file."""
-    for part in msg.walk():
-        if part.get_content_type() == "application/pdf":
-            pdf_bytes = part.get_payload(decode=True)
-            if not pdf_bytes:
-                continue
-
-            try:
-                reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text() + "\n"
-                return text
-            except:
-                return None
-    return None
-
-
-# ----------------------------
-# FETCH LATEST PDF SLIPS
-# ----------------------------
-def fetch_latest(limit=10):
+# --------------------------------------------------
+# Download latest email PDF and extract text
+# --------------------------------------------------
+def fetch_latest_pdf():
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(IMAP_USER, IMAP_PASS)
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select("inbox")
 
-        # Search ALL emails (no subject filter)
-        _, data = mail.search(None, "ALL")
+        _, data = mail.search(None, '(SUBJECT "Weighment Slip")')
         ids = data[0].split()
 
-        slips = []
+        if not ids:
+            return None, "NO_EMAIL"
 
-        for msg_id in ids[::-1][:limit]:  # reverse for latest first
-            _, raw = mail.fetch(msg_id, "(RFC822)")
-            msg = email.message_from_bytes(raw[0][1])
+        latest = ids[-1]
+        _, msg_data = mail.fetch(latest, "(RFC822)")
 
-            pdf_text = extract_pdf_text(msg)
-            if not pdf_text:
-                continue
+        msg = email.message_from_bytes(msg_data[0][1])
 
-            slip = {
-                "rst": extract_field(pdf_text, "RST"),
-                "vehicle": extract_field(pdf_text, "Vehicle"),
-                "party": extract_field(pdf_text, "Party"),
-                "place": extract_field(pdf_text, "Place"),
-                "material": extract_field(pdf_text, "Material"),
-                "gross": extract_field(pdf_text, "Gross"),
-                "tare": extract_field(pdf_text, "Tare"),
-                "time": extract_field(pdf_text, "Date"),
-            }
+        for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
+                filename = "latest.pdf"
+                path = f"/tmp/{filename}"
+                open(path, "wb").write(part.get_payload(decode=True))
+                return path, "OK"
 
-            slips.append(slip)
-
-        return slips
+        return None, "NO_PDF"
 
     except Exception as e:
-        return [{"error": f"IMAP error: {str(e)}"}]
+        return None, f"ERR: {e}"
 
 
-# ----------------------------
+# --------------------------------------------------
 # BOT UI
-# ----------------------------
+# --------------------------------------------------
 @dp.message(CommandStart())
 async def start(message: types.Message):
     kb = InlineKeyboardBuilder()
-    kb.button(text="📥 Latest Weighments", callback_data="latest")
+    kb.button(text="📥 Latest Weighment Slips", callback_data="latest")
     kb.adjust(1)
 
-    await message.answer(
-        "👋 Welcome Vinu!\nTap below to view latest weighment slips:",
-        reply_markup=kb.as_markup()
-    )
+    await message.answer("👋 Hey Vinu!\nChoose an option:", reply_markup=kb.as_markup())
 
 
 @dp.callback_query(lambda c: c.data == "latest")
 async def latest_slips(query: types.CallbackQuery):
-    slips = fetch_latest()
+    pdf_path, status = fetch_latest_pdf()
 
-    if not slips:
-        await query.message.edit_text("⚠ No weighment slips found.")
+    if status == "NO_EMAIL":
+        await query.message.answer("⚠ No weighment slips found in email.")
         return
 
-    if "error" in slips[0]:
-        await query.message.edit_text(f"⚠ Error: {slips[0]['error']}")
+    if status == "NO_PDF":
+        await query.message.answer("⚠ Email received but no PDF attached.")
         return
 
-    text = "📥 *Latest Weighment Slips*\n\n"
+    if "ERR:" in status:
+        await query.message.answer("⚠ Email error: " + status)
+        return
 
-    for s in slips:
-        text += (
-            f"• RST: {s['rst']}\n"
-            f"  🚛 Vehicle: {s['vehicle']}\n"
-            f"  🏢 Party: {s['party']}\n"
-            f"  📍 Place: {s['place']}\n"
-            f"  🌾 Material: {s['material']}\n"
-            f"  ⚖ Gross: {s['gross']} | Tare: {s['tare']}\n"
-            f"  🕒 Time: {s['time']}\n\n"
-        )
+    # Extract text from PDF
+    text = ocr_extract_text_from_pdf(pdf_path)
+    fields = parse_fields(text)
 
-    await query.message.edit_text(text, parse_mode="Markdown")
-    await query.answer()
+    msg = (
+        "📥 *Latest Weighment Slip*\n\n"
+        f"• *RST:* {fields['rst']}\n"
+        f"🚛 *Vehicle:* {fields['vehicle']}\n"
+        f"🏢 *Party:* {fields['party']}\n"
+        f"📍 *Place:* {fields['place']}\n"
+        f"🌾 *Material:* {fields['material']}\n"
+        f"⚖ *Gross:* {fields['gross']} | *Tare:* {fields['tare']}\n"
+    )
+
+    await query.message.answer(msg, parse_mode="Markdown")
 
 
-# ----------------------------
-# START BOT
-# ----------------------------
+# --------------------------------------------------
+# MAIN
+# --------------------------------------------------
 async def main():
-    print("BOT RUNNING — PDF READER ACTIVE")
+    print("BOT RUNNING – PDF READER ACTIVE")
     await dp.start_polling(bot)
 
 
