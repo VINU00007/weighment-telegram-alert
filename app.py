@@ -102,7 +102,7 @@ def fetch_slips():
 
         mail_ids = messages[0].split()
 
-        for num in reversed(mail_ids[-50:]):
+        for num in reversed(mail_ids[-200:]):
 
             status, msg_data = mail.fetch(num, "(RFC822)")
 
