@@ -8,6 +8,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
+# -------------------------
+# ENV VARIABLES
+# -------------------------
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
@@ -17,10 +21,10 @@ IMAP_SERVER = "imap.gmail.com"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-
 # -------------------------
 # READ PDF
 # -------------------------
+
 def read_pdf(data):
 
     text = ""
@@ -34,26 +38,42 @@ def read_pdf(data):
 
 
 # -------------------------
+# SAFE FIND FUNCTION
+# -------------------------
+
+def find(pattern, text):
+
+    m = re.search(pattern, text)
+
+    if not m:
+        return "-"
+
+    if m.lastindex:
+        return m.group(1).strip()
+
+    return m.group(0).strip()
+
+
+# -------------------------
 # PARSE WEIGHMENT DATA
 # -------------------------
+
 def parse_data(text):
 
     data = {}
 
-    def find(pattern):
-        m = re.search(pattern, text)
-        return m.group(1).strip() if m else "-"
+    data["rst"] = find(r"RST\s*:\s*(\d+)", text)
+    data["vehicle"] = find(r"Vehicle No\s*:\s*([A-Z0-9]+)", text)
+    data["party"] = find(r"PARTY NAME\s*:\s*([A-Z ]+)", text)
+    data["place"] = find(r"PLACE\s*:\s*([A-Z]+)", text)
+    data["material"] = find(r"MATERIAL\s*:\s*([A-Z ]+)", text)
 
-    data["rst"] = find(r"RST\s*:\s*(\d+)")
-    data["vehicle"] = find(r"Vehicle No\s*:\s*([A-Z0-9]+)")
-    data["party"] = find(r"PARTY NAME\s*:\s*([A-Z ]+)")
-    data["place"] = find(r"PLACE\s*:\s*([A-Z]+)")
-    data["material"] = find(r"MATERIAL\s*:\s*([A-Z ]+)")
-    data["gross"] = find(r"Gross\.\s*:\s*(\d+)")
-    data["tare"] = find(r"Tare\.\s*:\s*(\d+)")
-    data["net"] = find(r"Net\.\s*:\s*(\d+)")
-    data["date"] = find(r"(\d{2}-[A-Za-z]{3}-\d{2})")
-    data["time"] = find(r"\d{1,2}:\d{2}:\d{2}\s*[AP]M")
+    data["gross"] = find(r"Gross\.\s*:\s*(\d+)", text)
+    data["tare"] = find(r"Tare\.\s*:\s*(\d+)", text)
+    data["net"] = find(r"Net\.\s*:\s*(\d+)", text)
+
+    data["date"] = find(r"(\d{2}-[A-Za-z]{3}-\d{2})", text)
+    data["time"] = find(r"(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
 
     return data
 
@@ -61,37 +81,45 @@ def parse_data(text):
 # -------------------------
 # FETCH EMAILS
 # -------------------------
+
 def fetch_slips():
 
     slips = []
 
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL_USER, EMAIL_PASS)
-    mail.select("inbox")
+    try:
 
-    status, messages = mail.search(None, 'SUBJECT "WEIGHMENT"')
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        mail.select("inbox")
 
-    mail_ids = messages[0].split()
+        status, messages = mail.search(None, 'ALL')
 
-    for num in mail_ids[-50:]:
+        mail_ids = messages[0].split()
 
-        status, msg_data = mail.fetch(num, "(RFC822)")
+        # check last 50 emails
+        for num in mail_ids[-50:]:
 
-        for part in msg_data:
+            status, msg_data = mail.fetch(num, "(RFC822)")
 
-            if isinstance(part, tuple):
+            for response in msg_data:
 
-                msg = email.message_from_bytes(part[1])
+                if isinstance(response, tuple):
 
-                for p in msg.walk():
+                    msg = email.message_from_bytes(response[1])
 
-                    if p.get_content_type() == "application/pdf":
+                    for part in msg.walk():
 
-                        pdf_data = p.get_payload(decode=True)
+                        if part.get_content_type() == "application/pdf":
 
-                        text = read_pdf(pdf_data)
+                            pdf_data = part.get_payload(decode=True)
 
-                        slips.append(parse_data(text))
+                            text = read_pdf(pdf_data)
+
+                            slips.append(parse_data(text))
+
+    except Exception as e:
+
+        print("MAIL ERROR:", e)
 
     return slips
 
@@ -99,12 +127,14 @@ def fetch_slips():
 # -------------------------
 # TELEGRAM COMMAND
 # -------------------------
+
 @dp.message(CommandStart())
 async def start(message: Message):
 
     slips = fetch_slips()
 
     if len(slips) == 0:
+
         await message.answer("⚠ No weighment slips found.")
         return
 
@@ -128,6 +158,7 @@ async def start(message: Message):
 # -------------------------
 # RUN BOT
 # -------------------------
+
 async def main():
 
     print("BOT RUNNING — WEIGHMENT PARSER ACTIVE")
