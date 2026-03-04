@@ -1,186 +1,211 @@
-import os
-import asyncio
 import imaplib
 import email
-import re
 import fitz
-
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
-
-# -------------------------
-# ENV VARIABLES
-# -------------------------
+import re
+import os
+import asyncio
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.enums import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 
-IMAP_SERVER = "imap.gmail.com"
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+processed = {}
+history = []
 
-# -------------------------
-# READ PDF TEXT
-# -------------------------
 
-def read_pdf(data):
+def parse_pdf(data):
+
+    doc = fitz.open(stream=data, filetype="pdf")
     text = ""
-    pdf = fitz.open(stream=data, filetype="pdf")
 
-    for page in pdf:
+    for page in doc:
         text += page.get_text()
 
-    return text
+    def find(pattern):
+        m = re.search(pattern, text, re.IGNORECASE)
+        return m.group(1).strip() if m else "-"
+
+    rst = find(r"RST\s*:\s*(\d+)")
+    vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
+    party = find(r"PARTY\s*NAME\s*:\s*(.+)")
+    place = find(r"PLACE\s*:\s*(.+)")
+    material = find(r"MATERIAL\s*:\s*(.+)")
+    gross = find(r"Gross.*?(\d+)\s*Kgs")
+    tare = find(r"Tare.*?(\d+)\s*Kgs")
+
+    times = re.findall(r"\d{1,2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text)
+
+    t1 = t2 = None
+    if len(times) >= 1:
+        t1 = datetime.strptime(times[0], "%d-%b-%y %I:%M:%S %p")
+    if len(times) >= 2:
+        t2 = datetime.strptime(times[1], "%d-%b-%y %I:%M:%S %p")
+
+    return {
+        "rst": rst,
+        "vehicle": vehicle,
+        "party": party,
+        "place": place,
+        "material": material,
+        "gross": gross,
+        "tare": tare,
+        "t1": t1,
+        "t2": t2
+    }
 
 
-# -------------------------
-# SAFE REGEX FIND
-# -------------------------
-
-def find(pattern, text):
-    try:
-        m = re.search(pattern, text)
-
-        if not m:
-            return "-"
-
-        if m.lastindex:
-            return m.group(1).strip()
-
-        return m.group(0).strip()
-
-    except:
-        return "-"
-
-
-# -------------------------
-# PARSE WEIGHMENT DATA
-# -------------------------
-
-def parse_data(text):
-
-    data = {}
-
-    data["rst"] = find(r"RST\s*:\s*(\d+)", text)
-    data["vehicle"] = find(r"Vehicle No\s*:\s*([A-Z0-9]+)", text)
-
-    data["party"] = find(r"PARTY NAME\s*:\s*([A-Z0-9 ]+)", text)
-    data["place"] = find(r"PLACE\s*:\s*([A-Z0-9 ]+)", text)
-    data["material"] = find(r"MATERIAL\s*:\s*([A-Z0-9 ]+)", text)
-
-    data["gross"] = find(r"Gross\.\s*:\s*(\d+)", text)
-    data["tare"] = find(r"Tare\.\s*:\s*(\d+)", text)
-    data["net"] = find(r"Net\.\s*:\s*(\d+)", text)
-
-    data["date"] = find(r"(\d{2}-[A-Za-z]{3}-\d{2})", text)
-    data["time"] = find(r"(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
-
-    return data
-
-
-# -------------------------
-# FETCH EMAILS
-# -------------------------
-
-def fetch_slips():
+def fetch_mails():
 
     slips = []
-    seen_rst = set()
 
-    try:
+    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("inbox")
 
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-        mail.login(EMAIL_USER, EMAIL_PASS)
+    _, data = mail.search(None, "ALL")
+    ids = data[0].split()[-50:]
 
-        mail.select("inbox")
+    for num in ids:
 
-        status, messages = mail.search(None, 'SUBJECT "WEIGHMENT"')
+        _, msg_data = mail.fetch(num, "(RFC822)")
+        msg = email.message_from_bytes(msg_data[0][1])
 
-        mail_ids = messages[0].split()
+        for part in msg.walk():
 
-        for num in reversed(mail_ids[-200:]):
+            if part.get_content_type() == "application/pdf":
 
-            status, msg_data = mail.fetch(num, "(RFC822)")
-
-            for response in msg_data:
-
-                if isinstance(response, tuple):
-
-                    msg = email.message_from_bytes(response[1])
-
-                    for part in msg.walk():
-
-                        if part.get_content_type() == "application/pdf":
-
-                            pdf_data = part.get_payload(decode=True)
-
-                            text = read_pdf(pdf_data)
-
-                            data = parse_data(text)
-
-                            rst = data.get("rst", "-")
-
-                            if rst != "-" and rst not in seen_rst:
-
-                                slips.append(data)
-                                seen_rst.add(rst)
-
-    except Exception as e:
-        print("MAIL ERROR:", e)
-
-    def rst_value(s):
-        try:
-            return int(s.get("rst", 0))
-        except:
-            return 0
-
-    slips = sorted(slips, key=rst_value, reverse=True)
+                pdf = part.get_payload(decode=True)
+                slip = parse_pdf(pdf)
+                slips.append(slip)
 
     return slips
 
 
-# -------------------------
-# TELEGRAM COMMAND
-# -------------------------
+async def monitor():
 
-@dp.message(CommandStart())
-async def start(message: Message):
+    while True:
 
-    slips = fetch_slips()
+        slips = fetch_mails()
 
-    if len(slips) == 0:
-        await message.answer("⚠ No weighment slips found.")
-        return
+        for s in slips:
 
-    msg = "📥 Latest Weighment Slips\n\n"
+            rst = s["rst"]
 
-    for s in slips:
+            if rst == "-":
+                continue
 
-        msg += (
-            f"RST: {s['rst']}\n"
-            f"🚛 Vehicle: {s['vehicle']}\n"
-            f"🏢 Party: {s['party']}\n"
-            f"📍 Place: {s['place']}\n"
-            f"🌾 Material: {s['material']}\n"
-            f"⚖ Gross: {s['gross']} | Tare: {s['tare']} | Net: {s['net']}\n"
-            f"🕒 {s['date']} {s['time']}\n\n"
-        )
+            if rst not in processed:
 
-    await message.answer(msg)
+                processed[rst] = s
+
+                weight = s["gross"] if s["gross"] != "-" else s["tare"]
+                time = s["t1"]
+
+                msg = f"""
+⚖️ WEIGHMENT ALERT
+
+🧾 RST : {rst} | 🚛 {s['vehicle']}
+🏢 Party : {s['party']}
+📍 Place : {s['place']}
+🌾 Material : {s['material']}
+
+⚖ Weight : {weight} Kg
+🕒 {time.strftime("%d-%b-%y | %I:%M:%S %p")}
+
+🟡 STATUS : VEHICLE ENTERED YARD
+"""
+
+                await bot.send_message(chat_id=list(dp.chat_ids)[0], text=msg)
+
+            else:
+
+                prev = processed[rst]
+
+                if prev["t2"] is None and s["t2"]:
+
+                    entry = min(s["t1"], s["t2"])
+                    exit = max(s["t1"], s["t2"])
+
+                    yard = exit - entry
+
+                    net = "-"
+                    if s["gross"] != "-" and s["tare"] != "-":
+                        net = int(s["gross"]) - int(s["tare"])
+
+                    msg = f"""
+⚖️ WEIGHMENT COMPLETED
+
+🧾 RST : {rst} | 🚛 {s['vehicle']}
+🏢 Party : {s['party']}
+📍 Place : {s['place']}
+🌾 Material : {s['material']}
+
+⚖ Gross : {s['gross']}
+⚖ Tare  : {s['tare']}
+📦 Net   : {net}
+
+⏱ Yard Time : {yard}
+
+🕒 Exit : {exit.strftime("%d-%b-%y | %I:%M:%S %p")}
+"""
+
+                    history.append(s)
+                    await bot.send_message(chat_id=list(dp.chat_ids)[0], text=msg)
+
+        await asyncio.sleep(20)
 
 
-# -------------------------
-# RUN BOT
-# -------------------------
+@dp.message(Command("latest"))
+async def latest(msg: types.Message):
+
+    out = "📥 Latest Weighments\n\n"
+
+    for s in history[-20:]:
+
+        net = "-"
+        if s["gross"] != "-" and s["tare"] != "-":
+            net = int(s["gross"]) - int(s["tare"])
+
+        out += f"""
+RST {s['rst']} | {s['vehicle']}
+{s['t2'].strftime("%d-%b-%y | %I:%M:%S %p")}
+{s['party']} | {s['material']}
+Gross {s['gross']} | Tare {s['tare']} | Net {net}
+
+"""
+
+    await msg.answer(out)
+
+
+@dp.message(Command("yard"))
+async def yard(msg: types.Message):
+
+    out = "🚛 Trucks In Yard\n\n"
+
+    for r, s in processed.items():
+
+        if s["t2"] is None:
+
+            out += f"""
+RST {s['rst']} | {s['vehicle']}
+{s['material']}
+Entered : {s['t1'].strftime("%d-%b-%y | %I:%M:%S %p")}
+
+"""
+
+    await msg.answer(out)
+
 
 async def main():
 
-    print("BOT RUNNING — WEIGHMENT PARSER ACTIVE")
-
+    asyncio.create_task(monitor())
     await dp.start_polling(bot)
 
 
