@@ -97,7 +97,7 @@ def fetch_slips():
         mail_ids = messages[0].split()
 
         # check last 50 emails
-        for num in mail_ids[-50:]:
+        for num in reversed(mail_ids[-50:]):
 
             status, msg_data = mail.fetch(num, "(RFC822)")
 
