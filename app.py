@@ -16,16 +16,15 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 CHAT_ID = None
-processed = {}
-history = []
+last_uid = None
 
 
-# -----------------------------
+# -------------------------
 # PDF PARSER
-# -----------------------------
-def parse_pdf(data):
+# -------------------------
+def parse_pdf(pdf_bytes):
 
-    doc = fitz.open(stream=data, filetype="pdf")
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     text = ""
 
     for page in doc:
@@ -40,19 +39,40 @@ def parse_pdf(data):
     party = find(r"PARTY\s*NAME\s*:\s*(.+)")
     place = find(r"PLACE\s*:\s*(.+)")
     material = find(r"MATERIAL\s*:\s*(.+)")
-    gross = find(r"Gross.*?(\d+)\s*Kgs")
-    tare = find(r"Tare.*?(\d+)\s*Kgs")
 
-    times = re.findall(r"\d{1,2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text)
+    gross = find(r"Gross\.\s*:\s*(\d+)")
+    tare = find(r"Tare\.\s*:\s*(\d+)")
+    net = find(r"Net\.\s*:\s*(\d+)")
 
-    t1 = None
-    t2 = None
+    times = re.findall(r"\d{2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text)
+
+    gross_time = "-"
+    tare_time = "-"
 
     if len(times) >= 1:
-        t1 = datetime.strptime(times[0], "%d-%b-%y %I:%M:%S %p")
+        gross_time = times[0]
 
     if len(times) >= 2:
-        t2 = datetime.strptime(times[1], "%d-%b-%y %I:%M:%S %p")
+        tare_time = times[1]
+
+    yard_time = "-"
+
+    try:
+        if gross_time != "-" and tare_time != "-":
+
+            t1 = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
+            t2 = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
+
+            diff = abs(t1 - t2)
+
+            hours = diff.seconds // 3600
+            minutes = (diff.seconds % 3600) // 60
+            seconds = diff.seconds % 60
+
+            yard_time = f"{hours}h {minutes}m {seconds}s"
+
+    except:
+        pass
 
     return {
         "rst": rst,
@@ -62,203 +82,113 @@ def parse_pdf(data):
         "material": material,
         "gross": gross,
         "tare": tare,
-        "t1": t1,
-        "t2": t2
+        "net": net,
+        "gross_time": gross_time,
+        "tare_time": tare_time,
+        "yard_time": yard_time
     }
 
 
-# -----------------------------
-# EMAIL FETCHER
-# -----------------------------
-def fetch_mails():
+# -------------------------
+# EMAIL CHECKER
+# -------------------------
+def check_email():
+
+    global last_uid
+
+    mail = imaplib.IMAP4_SSL("imap.gmail.com")
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("inbox")
+
+    result, data = mail.uid("search", None, "ALL")
+    ids = data[0].split()
+
+    if not ids:
+        return []
+
+    if last_uid is None:
+        last_uid = ids[-1]
+        return []
+
+    new_ids = [i for i in ids if int(i) > int(last_uid)]
 
     slips = []
 
-    try:
+    for uid in new_ids:
 
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL_USER, EMAIL_PASS)
-        mail.select("inbox")
+        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
+        msg = email.message_from_bytes(msg_data[0][1])
 
-        _, data = mail.search(None, "ALL")
-        ids = data[0].split()[-50:]
+        for part in msg.walk():
 
-        for num in ids:
+            if part.get_content_type() == "application/pdf":
 
-            _, msg_data = mail.fetch(num, "(RFC822)")
-            msg = email.message_from_bytes(msg_data[0][1])
+                pdf_bytes = part.get_payload(decode=True)
+                slip = parse_pdf(pdf_bytes)
+                slips.append(slip)
 
-            for part in msg.walk():
+        last_uid = uid
 
-                if part.get_content_type() == "application/pdf":
-
-                    pdf = part.get_payload(decode=True)
-                    slip = parse_pdf(pdf)
-                    slips.append(slip)
-
-        mail.logout()
-
-    except Exception as e:
-        print("MAIL ERROR:", e)
+    mail.logout()
 
     return slips
 
 
-# -----------------------------
-# MONITOR LOOP
-# -----------------------------
+# -------------------------
+# MONITOR
+# -------------------------
 async def monitor():
 
     while True:
 
-        slips = fetch_mails()
+        slips = check_email()
 
         for s in slips:
 
-            rst = s["rst"]
-
-            if rst == "-":
+            if CHAT_ID is None:
                 continue
 
-            # FIRST WEIGHMENT
-            if rst not in processed:
+            msg = f"""
+⚖️ WEIGHMENT SLIP
 
-                processed[rst] = s
+RST : {s['rst']}
+🚛 Vehicle : {s['vehicle']}
 
-                weight = s["gross"] if s["gross"] != "-" else s["tare"]
-                time = s["t1"]
-
-                if CHAT_ID and time:
-
-                    msg = f"""
-⚖️ WEIGHMENT ALERT
-
-🧾 RST : {rst} | 🚛 {s['vehicle']}
 🏢 Party : {s['party']}
 📍 Place : {s['place']}
 🌾 Material : {s['material']}
 
-⚖ Weight : {weight} Kg
-🕒 {time.strftime("%d-%b-%y | %I:%M:%S %p")}
+⚖ Gross : {s['gross']} Kg
+🕒 {s['gross_time']}
 
-🟡 STATUS : VEHICLE ENTERED YARD
+⚖ Tare : {s['tare']} Kg
+🕒 {s['tare_time']}
+
+📦 Net : {s['net']} Kg
+
+⏱ Yard Time : {s['yard_time']}
 """
 
-                    await bot.send_message(CHAT_ID, msg)
-
-            # SECOND WEIGHMENT
-            else:
-
-                prev = processed[rst]
-
-                if prev["t2"] is None and s["t2"]:
-
-                    entry = min(s["t1"], s["t2"])
-                    exit = max(s["t1"], s["t2"])
-
-                    yard = exit - entry
-
-                    net = "-"
-                    if s["gross"] != "-" and s["tare"] != "-":
-                        net = int(s["gross"]) - int(s["tare"])
-
-                    if CHAT_ID:
-
-                        msg = f"""
-⚖️ WEIGHMENT COMPLETED
-
-🧾 RST : {rst} | 🚛 {s['vehicle']}
-🏢 Party : {s['party']}
-📍 Place : {s['place']}
-🌾 Material : {s['material']}
-
-⚖ Gross : {s['gross']}
-⚖ Tare  : {s['tare']}
-📦 Net   : {net}
-
-⏱ Yard Time : {yard}
-
-🕒 Exit : {exit.strftime("%d-%b-%y | %I:%M:%S %p")}
-"""
-
-                        await bot.send_message(CHAT_ID, msg)
-
-                    history.append(s)
+            await bot.send_message(CHAT_ID, msg)
 
         await asyncio.sleep(20)
 
 
-# -----------------------------
-# START COMMAND
-# -----------------------------
+# -------------------------
+# START
+# -------------------------
 @dp.message(Command("start"))
 async def start(msg: types.Message):
 
     global CHAT_ID
     CHAT_ID = msg.chat.id
 
-    await msg.answer(
-        "✅ Weighment bot connected.\n"
-        "Real-time alerts will appear here."
-    )
+    await msg.answer("✅ Weighment alert bot activated.")
 
 
-# -----------------------------
-# LATEST COMMAND
-# -----------------------------
-@dp.message(Command("latest"))
-async def latest(msg: types.Message):
-
-    if not history:
-        await msg.answer("No weighments found.")
-        return
-
-    out = "📥 Latest Weighments\n\n"
-
-    for s in history[-20:]:
-
-        net = "-"
-        if s["gross"] != "-" and s["tare"] != "-":
-            net = int(s["gross"]) - int(s["tare"])
-
-        time = s["t2"] if s["t2"] else s["t1"]
-
-        out += f"""
-RST {s['rst']} | {s['vehicle']}
-{time.strftime("%d-%b-%y | %I:%M:%S %p")}
-{s['party']} | {s['material']}
-Gross {s['gross']} | Tare {s['tare']} | Net {net}
-
-"""
-
-    await msg.answer(out)
-
-
-# -----------------------------
-# YARD COMMAND
-# -----------------------------
-@dp.message(Command("yard"))
-async def yard(msg: types.Message):
-
-    out = "🚛 Trucks In Yard\n\n"
-
-    for r, s in processed.items():
-
-        if s["t2"] is None and s["t1"]:
-
-            out += f"""
-RST {s['rst']} | {s['vehicle']}
-{s['material']}
-Entered : {s['t1'].strftime("%d-%b-%y | %I:%M:%S %p")}
-
-"""
-
-    await msg.answer(out)
-
-
-# -----------------------------
+# -------------------------
 # MAIN
-# -----------------------------
+# -------------------------
 async def main():
 
     asyncio.create_task(monitor())
