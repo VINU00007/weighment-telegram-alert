@@ -92,7 +92,7 @@ def fetch_slips():
         mail.login(EMAIL_USER, EMAIL_PASS)
         mail.select("inbox")
 
-        status, messages = mail.search(None, 'ALL')
+        status, messages = mail.search(None, 'SUBJECT "WEIGHMENT"')
 
         mail_ids = messages[0].split()
 
