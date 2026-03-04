@@ -85,6 +85,7 @@ def parse_data(text):
 def fetch_slips():
 
     slips = []
+    seen_rst = set()
 
     try:
 
@@ -115,7 +116,11 @@ def fetch_slips():
 
                             text = read_pdf(pdf_data)
 
-                            slips.append(parse_data(text))
+                            data = parse_data(text)
+
+                         if data["rst"] not in seen_rst:
+                             slips.append(data)
+                             seen_rst.add(data["rst"])
 
     except Exception as e:
 
