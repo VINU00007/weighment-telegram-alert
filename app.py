@@ -69,6 +69,7 @@ def parse_pdf(data):
         r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
         text,
     )
+
     if g:
         gross = g.group(1)
         gross_time = f"{g.group(2)} {g.group(3)}"
@@ -77,63 +78,70 @@ def parse_pdf(data):
         r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
         text,
     )
+
     if t:
         tare = t.group(1)
         tare_time = f"{t.group(2)} {t.group(3)}"
 
     n = re.search(r"Net\.\s*:\s*(\d+)", text)
+
     if n:
         net = n.group(1)
 
     return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time
 
 
-def read_mail():
+def process_email(msg):
+
+    date = parsedate_to_datetime(msg["Date"])
+
+    slips = []
+
+    for part in msg.walk():
+
+        if part.get_content_type() == "application/pdf":
+
+            pdf_data = part.get_payload(decode=True)
+
+            parsed = parse_pdf(pdf_data)
+
+            slips.append((date, parsed))
+
+    return slips
+
+
+async def email_idle_monitor():
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
-    ids = d[0].split()[-100:]
-
-    slips = []
-
-    for i in ids:
-
-        r, data = mail.uid("fetch", i, "(RFC822)")
-        msg = email.message_from_bytes(data[0][1])
-
-        date = parsedate_to_datetime(msg["Date"])
-
-        for part in msg.walk():
-
-            if part.get_content_type() == "application/pdf":
-
-                pdf_data = part.get_payload(decode=True)
-                parsed = parse_pdf(pdf_data)
-
-                slips.append((date, parsed))
-
-    mail.logout()
-
-    # sort by mail date
-    slips.sort(key=lambda x: x[0])
-
-    return [s[1] for s in slips]
-
-
-async def monitor():
-
     while True:
 
         try:
 
-            slips = read_mail()
+            mail.idle()
+            mail.idle_check(timeout=300)
+            mail.idle_done()
+
+            r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
+
+            ids = d[0].split()[-10:]
+
+            slips = []
+
+            for i in ids:
+
+                r, data = mail.uid("fetch", i, "(RFC822)")
+                msg = email.message_from_bytes(data[0][1])
+
+                slips.extend(process_email(msg))
+
+            slips.sort(key=lambda x: x[0])
 
             for s in slips:
 
-                rst, vehicle, party, place, material, gross, tare, net, gt, tt = s
+                rst, vehicle, party, place, material, gross, tare, net, gt, tt = s[1]
 
                 if net != "-":
                     key = f"{rst}_final"
@@ -177,9 +185,10 @@ async def monitor():
                 await bot.send_message(CHAT_ID, msg)
 
         except Exception as e:
+
             print("MAIL ERROR:", e)
 
-        await asyncio.sleep(20)
+            await asyncio.sleep(5)
 
 
 @dp.message(Command("last5"))
@@ -199,7 +208,10 @@ async def last5(message: Message):
 
 async def main():
 
-    asyncio.create_task(monitor())
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    asyncio.create_task(email_idle_monitor())
+
     await dp.start_polling(bot)
 
 
