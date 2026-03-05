@@ -5,6 +5,7 @@ import re
 import os
 import asyncio
 import io
+import json
 from datetime import datetime
 from aiogram import Bot
 
@@ -15,7 +16,18 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 
-sent = set()
+STATE_FILE = "processed.json"
+
+if os.path.exists(STATE_FILE):
+    with open(STATE_FILE) as f:
+        sent = set(json.load(f))
+else:
+    sent = set()
+
+
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(list(sent), f)
 
 
 def parse_pdf(data):
@@ -105,7 +117,7 @@ def read_mail():
 
     ids = d[0].split()[-10:]
 
-    out = []
+    slips = []
 
     for i in ids:
 
@@ -116,11 +128,11 @@ def read_mail():
 
             if p.get_content_type() == "application/pdf":
 
-                out.append(parse_pdf(p.get_payload(decode=True)))
+                slips.append(parse_pdf(p.get_payload(decode=True)))
 
     mail.logout()
 
-    return out
+    return slips
 
 
 async def monitor():
@@ -135,21 +147,25 @@ async def monitor():
 
                 rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = s
 
-                key = f"{rst}_{net}"
+                if net != "-":
+                    key = f"{rst}_final"
+                else:
+                    key = f"{rst}_first"
 
                 if key in sent:
                     continue
 
                 sent.add(key)
+                save_state()
 
                 if net != "-":
 
-                    status = "🟢 STATUS : VEHICLE APPROVED FOR GATE PASS"
+                    status = "🟢 STATUS : TRUCK READY FOR GATE PASS"
                     yard_status = f"⏱ Yard Time : {yard}"
 
                 else:
 
-                    status = "🟡 STATUS : SECOND WEIGHMENT PENDING"
+                    status = "🟡 STATUS : TRUCK ENTERED YARD"
                     yard_status = "⏱ Yard Status : VEHICLE IN YARD"
 
                 msg = f"""
@@ -177,17 +193,16 @@ async def monitor():
                 await bot.send_message(CHAT_ID, msg)
 
         except Exception as e:
-
             print("MAIL ERROR:", e)
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)
 
 
 async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    print("BOT RUNNING — WEIGHMENT PARSER ACTIVE")
+    print("WEIGHMENT ALERT BOT RUNNING")
 
     await monitor()
 
