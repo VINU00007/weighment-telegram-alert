@@ -18,6 +18,11 @@ bot = Bot(token=BOT_TOKEN)
 sent_events = set()
 
 
+def extract_block(text, keyword):
+    m = re.search(keyword + r".{0,120}", text, re.IGNORECASE)
+    return m.group(0) if m else ""
+
+
 def parse_pdf(pdf_bytes):
 
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -31,8 +36,8 @@ def parse_pdf(pdf_bytes):
 
     text = re.sub(r"\s+", " ", text)
 
-    def find(pattern):
-        m = re.search(pattern, text, re.IGNORECASE)
+    def find(p):
+        m = re.search(p, text, re.IGNORECASE)
         return m.group(1).strip() if m else "-"
 
     rst = find(r"RST\s*:\s*(\d+)")
@@ -41,34 +46,36 @@ def parse_pdf(pdf_bytes):
     place = find(r"PLACE\s*:\s*([A-Z]+)")
     material = find(r"MATERIAL\s*:\s*(.*?) CELL")
 
-    gross_match = re.search(
-        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-    )
+    gross_block = extract_block(text, "Gross")
+    tare_block = extract_block(text, "Tare")
+    net_block = extract_block(text, "Net")
 
-    tare_match = re.search(
-        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-    )
+    gross = find(r"Gross.*?(\d{3,6})")
+    tare = find(r"Tare.*?(\d{3,6})")
+    net = find(r"Net.*?(\d{3,6})")
 
-    net = find(r"Net\.\s*:\s*(\d+)")
+    date_pattern = r"\d{2}-[A-Za-z]{3}-\d{2}"
+    time_pattern = r"\d{1,2}:\d{2}:\d{2}\s*[AP]M"
 
-    gross = "-"
-    tare = "-"
     gross_time = "-"
     tare_time = "-"
 
-    if gross_match:
-        gross = gross_match.group(1)
-        gross_time = f"{gross_match.group(2)} {gross_match.group(3)}"
+    g_date = re.search(date_pattern, gross_block)
+    g_time = re.search(time_pattern, gross_block)
 
-    if tare_match:
-        tare = tare_match.group(1)
-        tare_time = f"{tare_match.group(2)} {tare_match.group(3)}"
+    t_date = re.search(date_pattern, tare_block)
+    t_time = re.search(time_pattern, tare_block)
+
+    if g_date and g_time:
+        gross_time = f"{g_date.group()} {g_time.group()}"
+
+    if t_date and t_time:
+        tare_time = f"{t_date.group()} {t_time.group()}"
 
     yard_time = "-"
 
     try:
+
         if gross_time != "-" and tare_time != "-":
 
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
