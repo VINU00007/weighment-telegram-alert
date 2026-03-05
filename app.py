@@ -1,7 +1,6 @@
 import imaplib
 import email
 import pdfplumber
-import re
 import os
 import asyncio
 import io
@@ -41,62 +40,57 @@ def parse_pdf(data):
             if t:
                 text += t + "\n"
 
-    text = re.sub(r"\s+", " ", text)
+    lines = text.split("\n")
 
-    def get(p):
-        m = re.search(p, text, re.I)
-        return m.group(1).strip() if m else "-"
-
-    rst = get(r"RST\s*:\s*(\d+)")
-    vehicle = get(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
-    party = get(r"PARTY\s*NAME\s*:\s*(.*?) PLACE")
-    place = get(r"PLACE\s*:\s*(\w+)")
-    material = get(r"MATERIAL\s*:\s*(.*?) CELL")
-
+    rst = "-"
+    vehicle = "-"
+    party = "-"
+    place = "-"
+    material = "-"
     gross = "-"
     tare = "-"
     net = "-"
-
     gross_time = "-"
     tare_time = "-"
 
-    g = re.search(
-        r"Gross\.\s*:\s*(\d+)\s*Kgs.*?(\d{2}-[A-Za-z]{3}-\d{2}).*?(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-        re.S,
-    )
+    for line in lines:
 
-    if g:
-        gross = g.group(1)
-        gross_time = f"{g.group(2)} {g.group(3)}"
+        if "RST" in line:
+            rst = line.split(":")[-1].strip()
 
-    t = re.search(
-        r"Tare\.\s*:\s*(\d+)\s*Kgs.*?(\d{2}-[A-Za-z]{3}-\d{2}).*?(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-        re.S,
-    )
+        if "Vehicle" in line:
+            vehicle = line.split(":")[-1].strip()
 
-    if t:
-        tare = t.group(1)
-        tare_time = f"{t.group(2)} {t.group(3)}"
+        if "PARTY" in line:
+            party = line.split(":")[-1].strip()
 
-    n = re.search(r"Net\.\s*:\s*(\d+)", text)
+        if "PLACE" in line:
+            place = line.split(":")[-1].strip()
 
-    if n:
-        net = n.group(1)
+        if "MATERIAL" in line:
+            material = line.split(":")[-1].strip()
+
+        if "Gross" in line:
+            gross = line.split(":")[-1].replace("Kgs","").strip()
+
+        if "Tare" in line:
+            tare = line.split(":")[-1].replace("Kgs","").strip()
+
+        if "Net" in line:
+            net = line.split(":")[-1].replace("Kgs","").strip()
 
     yard = "-"
 
     try:
         if gross_time != "-" and tare_time != "-":
 
-            g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
-            t = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
+            g = datetime.strptime(gross_time,"%d-%b-%y %I:%M:%S %p")
+            t = datetime.strptime(tare_time,"%d-%b-%y %I:%M:%S %p")
 
-            d = abs(g - t)
+            d = abs(g-t)
 
-            h = d.seconds // 3600
-            m = (d.seconds % 3600) // 60
+            h = d.seconds//3600
+            m = (d.seconds%3600)//60
 
             yard = f"{h}h {m}m"
 
@@ -114,7 +108,7 @@ def read_mail():
 
     r, d = mail.uid("search", None, "ALL")
 
-    ids = d[0].split()[-10:]
+    ids = d[0].split()[-5:]
 
     slips = []
 
@@ -178,10 +172,7 @@ async def monitor():
 🌾 Material : {material}
 
 ⚖ Gross : {gross} Kg
-🕒 {gt}
-
 ⚖ Tare : {tare} Kg
-🕒 {tt}
 
 📦 Net : {net} Kg
 
