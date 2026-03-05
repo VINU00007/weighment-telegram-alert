@@ -17,88 +17,80 @@ bot = Bot(token=BOT_TOKEN)
 LAST_UID = None
 
 
-# -------------------------
-# PDF PARSER
-# -------------------------
 def parse_pdf(pdf_bytes):
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     text = ""
-
     for page in doc:
         text += page.get_text()
+
+    text = text.replace("\n", " ")
 
     def find(pattern):
         m = re.search(pattern, text, re.IGNORECASE)
         return m.group(1).strip() if m else "-"
 
     rst = find(r"RST\s*:\s*(\d+)")
-
     vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
+    party = find(r"PARTY\s*NAME\s*([A-Z0-9\s]+)")
+    place = find(r"PLACE\s*:\s*([A-Z]+)")
+    material = find(r"MATERIAL\s*:\s*([A-Z\s]+)")
 
-    party = find(r"PARTY\s*NAME\s*:\s*(.+)")
-
-    place = find(r"PLACE\s*:\s*(.+)")
-
-    material = find(r"MATERIAL\s*:\s*(.+)")
-
-    gross = find(r"Gross\s*Wt\s*[:\-]?\s*(\d+)")
-
-    tare = find(r"Tare\s*Wt\s*[:\-]?\s*(\d+)")
-
-    net = find(r"Net\s*Wt\s*[:\-]?\s*(\d+)")
-
-    times = re.findall(
-        r"\d{2}-[A-Za-z]{3}-\d{2}\s*\n?\s*\d{1,2}:\d{2}:\d{2}\s*[AP]M",
-        text
+    gross_match = re.search(
+        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
     )
 
-    gross_time = times[0].replace("\n", " ") if len(times) > 0 else "-"
+    tare_match = re.search(
+        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
 
-    tare_time = times[1].replace("\n", " ") if len(times) > 1 else "-"
+    net_match = re.search(r"Net\.\s*:\s*(\d+)", text)
+
+    gross = gross_match.group(1) if gross_match else "-"
+    tare = tare_match.group(1) if tare_match else "-"
+    net = net_match.group(1) if net_match else "-"
+
+    gross_time = "-"
+    tare_time = "-"
+
+    if gross_match:
+        gross_time = gross_match.group(2) + " " + gross_match.group(3)
+
+    if tare_match:
+        tare_time = tare_match.group(2) + " " + tare_match.group(3)
 
     yard = "-"
 
     try:
-
         if gross_time != "-" and tare_time != "-":
+            g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
+            t = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
 
-            t1 = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
-
-            t2 = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
-
-            diff = abs(t1 - t2)
+            diff = abs(g - t)
 
             h = diff.seconds // 3600
-
             m = (diff.seconds % 3600) // 60
-
             s = diff.seconds % 60
 
             yard = f"{h}h {m}m {s}s"
-
     except:
         pass
 
     return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard
 
 
-# -------------------------
-# CHECK EMAIL
-# -------------------------
 def check_mail():
 
     global LAST_UID
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
-
     mail.login(EMAIL_USER, EMAIL_PASS)
-
     mail.select("inbox")
 
     result, data = mail.uid("search", None, "ALL")
-
     ids = data[0].split()
 
     if not ids:
@@ -112,7 +104,6 @@ def check_mail():
     LAST_UID = latest_uid
 
     result, msg_data = mail.uid("fetch", latest_uid, "(RFC822)")
-
     msg = email.message_from_bytes(msg_data[0][1])
 
     for part in msg.walk():
@@ -126,9 +117,6 @@ def check_mail():
     return None
 
 
-# -------------------------
-# MONITOR LOOP
-# -------------------------
 async def monitor():
 
     while True:
@@ -165,15 +153,11 @@ async def monitor():
                 await bot.send_message(CHAT_ID, message)
 
         except Exception as e:
-
             print("MAIL ERROR:", e)
 
         await asyncio.sleep(30)
 
 
-# -------------------------
-# MAIN
-# -------------------------
 async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
@@ -184,5 +168,4 @@ async def main():
 
 
 if __name__ == "__main__":
-
     asyncio.run(main())
