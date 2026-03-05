@@ -5,6 +5,7 @@ import os
 import asyncio
 import io
 import json
+import re
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -32,6 +33,13 @@ def save_state():
         json.dump(list(sent), f)
 
 
+def extract_between(text, start, end):
+    try:
+        return text.split(start)[1].split(end)[0].strip()
+    except:
+        return "-"
+
+
 def parse_pdf(data):
 
     with pdfplumber.open(io.BytesIO(data)) as pdf:
@@ -39,60 +47,35 @@ def parse_pdf(data):
         for p in pdf.pages:
             t = p.extract_text()
             if t:
-                text += t + "\n"
+                text += t + " "
 
-    lines = text.split("\n")
+    text = " ".join(text.split())
 
-    rst = "-"
-    vehicle = "-"
-    party = "-"
-    place = "-"
-    material = "-"
+    rst = extract_between(text, "RST :", "Vehicle No")
+    vehicle = extract_between(text, "Vehicle No :", "PARTY NAME")
+    party = extract_between(text, "PARTY NAME :", "PLACE")
+    place = extract_between(text, "PLACE :", "MATERIAL")
+    material = extract_between(text, "MATERIAL :", "CELL")
+
     gross = "-"
     tare = "-"
     net = "-"
     gross_time = "-"
     tare_time = "-"
 
-    for line in lines:
+    g = re.search(r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
+    if g:
+        gross = g.group(1)
+        gross_time = f"{g.group(2)} {g.group(3)}"
 
-        if "RST" in line and ":" in line:
-            rst = line.split(":")[1].strip()
+    t = re.search(r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
+    if t:
+        tare = t.group(1)
+        tare_time = f"{t.group(2)} {t.group(3)}"
 
-        if "Vehicle" in line and ":" in line:
-            vehicle = line.split(":")[1].strip()
-
-        if "PARTY" in line and ":" in line:
-            party = line.split(":")[1].strip()
-
-        if "PLACE" in line and ":" in line:
-            place = line.split(":")[1].strip()
-
-        if "MATERIAL" in line and ":" in line:
-            material = line.split(":")[1].strip()
-
-        if "Gross" in line:
-            parts = line.split()
-            for p in parts:
-                if p.isdigit():
-                    gross = p
-                    break
-            gross_time = " ".join(parts[-3:])
-
-        if "Tare" in line:
-            parts = line.split()
-            for p in parts:
-                if p.isdigit():
-                    tare = p
-                    break
-            tare_time = " ".join(parts[-3:])
-
-        if "Net" in line:
-            parts = line.split()
-            for p in parts:
-                if p.isdigit():
-                    net = p
-                    break
+    n = re.search(r"Net\.\s*:\s*(\d+)", text)
+    if n:
+        net = n.group(1)
 
     return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time
 
@@ -104,20 +87,16 @@ def read_mail():
     mail.select("inbox")
 
     r, d = mail.uid("search", None, "ALL")
-
     ids = d[0].split()[-100:]
 
     slips = []
 
     for i in ids:
-
         r, data = mail.uid("fetch", i, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
 
         for p in msg.walk():
-
             if p.get_content_type() == "application/pdf":
-
                 slips.append(parse_pdf(p.get_payload(decode=True)))
 
     mail.logout()
@@ -193,10 +172,6 @@ async def monitor():
 @dp.callback_query(lambda c: c.data == "last5")
 async def show_last5(callback: types.CallbackQuery):
 
-    if not last_weighments:
-        await callback.message.answer("No weighments available")
-        return
-
     text = "⚖️ LAST 5 WEIGHMENTS\n\n"
 
     for w in last_weighments[-5:]:
@@ -208,7 +183,6 @@ async def show_last5(callback: types.CallbackQuery):
 async def main():
 
     asyncio.create_task(monitor())
-
     await dp.start_polling(bot)
 
 
