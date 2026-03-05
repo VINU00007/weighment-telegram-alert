@@ -12,7 +12,7 @@ from aiogram import Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 
 bot = Bot(token=BOT_TOKEN)
 
@@ -88,7 +88,6 @@ def parse_pdf(data):
     yard = "-"
 
     try:
-
         if gross_time != "-" and tare_time != "-":
 
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
