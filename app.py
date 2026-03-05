@@ -5,7 +5,7 @@ import asyncio
 import io
 import json
 import re
-import fitz  # PyMuPDF
+import fitz
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -14,6 +14,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = int(os.getenv("CHAT_ID"))
+
+# 👇 email that sends weighment slips
+WEIGHBRIDGE_EMAIL = "vtsbharat@gmail.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -92,7 +95,9 @@ def read_mail():
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    r, d = mail.uid("search", None, "ALL")
+    # 👇 search only mails from weighbridge sender
+    r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
+
     ids = d[0].split()[-100:]
 
     slips = []
@@ -103,10 +108,14 @@ def read_mail():
         msg = email.message_from_bytes(data[0][1])
 
         for part in msg.walk():
+
             if part.get_content_type() == "application/pdf":
-                slips.append(parse_pdf(part.get_payload(decode=True)))
+
+                pdf_data = part.get_payload(decode=True)
+                slips.append(parse_pdf(pdf_data))
 
     mail.logout()
+
     return slips
 
 
@@ -187,6 +196,7 @@ async def last5(message: Message):
 async def main():
 
     asyncio.create_task(monitor())
+
     await dp.start_polling(bot)
 
 
