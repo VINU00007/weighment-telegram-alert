@@ -15,64 +15,63 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 
-sent_events = set()
+sent = set()
 
 
-def extract_block(text, keyword):
-    m = re.search(keyword + r".{0,120}", text, re.IGNORECASE)
-    return m.group(0) if m else ""
+def parse_pdf(data):
 
-
-def parse_pdf(pdf_bytes):
-
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
 
         text = ""
 
-        for page in pdf.pages:
-            t = page.extract_text()
+        for p in pdf.pages:
+            t = p.extract_text()
             if t:
                 text += t + "\n"
 
     text = re.sub(r"\s+", " ", text)
 
-    def find(p):
-        m = re.search(p, text, re.IGNORECASE)
+    def get(p):
+        m = re.search(p, text, re.I)
         return m.group(1).strip() if m else "-"
 
-    rst = find(r"RST\s*:\s*(\d+)")
-    vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
-    party = find(r"PARTY\s*NAME\s*:\s*(.*?) PLACE")
-    place = find(r"PLACE\s*:\s*([A-Z]+)")
-    material = find(r"MATERIAL\s*:\s*(.*?) CELL")
+    rst = get(r"RST\s*:\s*(\d+)")
+    vehicle = get(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
+    party = get(r"PARTY\s*NAME\s*:\s*(.*?) PLACE")
+    place = get(r"PLACE\s*:\s*(\w+)")
+    material = get(r"MATERIAL\s*:\s*(.*?) CELL")
 
-    gross_block = extract_block(text, "Gross")
-    tare_block = extract_block(text, "Tare")
-    net_block = extract_block(text, "Net")
-
-    gross = find(r"Gross.*?(\d{3,6})")
-    tare = find(r"Tare.*?(\d{3,6})")
-    net = find(r"Net.*?(\d{3,6})")
-
-    date_pattern = r"\d{2}-[A-Za-z]{3}-\d{2}"
-    time_pattern = r"\d{1,2}:\d{2}:\d{2}\s*[AP]M"
+    gross = "-"
+    tare = "-"
+    net = "-"
 
     gross_time = "-"
     tare_time = "-"
 
-    g_date = re.search(date_pattern, gross_block)
-    g_time = re.search(time_pattern, gross_block)
+    g = re.search(
+        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
 
-    t_date = re.search(date_pattern, tare_block)
-    t_time = re.search(time_pattern, tare_block)
+    if g:
+        gross = g.group(1)
+        gross_time = f"{g.group(2)} {g.group(3)}"
 
-    if g_date and g_time:
-        gross_time = f"{g_date.group()} {g_time.group()}"
+    t = re.search(
+        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
 
-    if t_date and t_time:
-        tare_time = f"{t_date.group()} {t_time.group()}"
+    if t:
+        tare = t.group(1)
+        tare_time = f"{t.group(2)} {t.group(3)}"
 
-    yard_time = "-"
+    n = re.search(r"Net\.\s*:\s*(\d+)", text)
+
+    if n:
+        net = n.group(1)
+
+    yard = "-"
 
     try:
 
@@ -81,47 +80,45 @@ def parse_pdf(pdf_bytes):
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
             t = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
 
-            diff = abs(g - t)
+            d = abs(g - t)
 
-            h = diff.seconds // 3600
-            m = (diff.seconds % 3600) // 60
+            h = d.seconds // 3600
+            m = (d.seconds % 3600) // 60
 
-            yard_time = f"{h}h {m}m"
+            yard = f"{h}h {m}m"
 
     except:
         pass
 
-    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard_time
+    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard
 
 
-def check_mail():
+def read_mail():
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    result, data = mail.uid("search", None, "ALL")
+    r, d = mail.uid("search", None, "ALL")
 
-    ids = data[0].split()[-10:]
+    ids = d[0].split()[-10:]
 
-    slips = []
+    out = []
 
-    for uid in ids:
+    for i in ids:
 
-        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        msg = email.message_from_bytes(msg_data[0][1])
+        r, data = mail.uid("fetch", i, "(RFC822)")
+        msg = email.message_from_bytes(data[0][1])
 
-        for part in msg.walk():
+        for p in msg.walk():
 
-            if part.get_content_type() == "application/pdf":
+            if p.get_content_type() == "application/pdf":
 
-                pdf_bytes = part.get_payload(decode=True)
-
-                slips.append(parse_pdf(pdf_bytes))
+                out.append(parse_pdf(p.get_payload(decode=True)))
 
     mail.logout()
 
-    return slips
+    return out
 
 
 async def monitor():
@@ -130,18 +127,18 @@ async def monitor():
 
         try:
 
-            slips = check_mail()
+            slips = read_mail()
 
-            for data in slips:
+            for s in slips:
 
-                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = data
+                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = s
 
-                event_id = f"{rst}_{net}"
+                key = f"{rst}_{net}"
 
-                if event_id in sent_events:
+                if key in sent:
                     continue
 
-                sent_events.add(event_id)
+                sent.add(key)
 
                 if net != "-":
 
@@ -153,7 +150,7 @@ async def monitor():
                     status = "🟡 STATUS : SECOND WEIGHMENT PENDING"
                     yard_status = "⏱ Yard Status : VEHICLE IN YARD"
 
-                message = f"""
+                msg = f"""
 ⚖️ WEIGHMENT ALERT
 
 🧾 RST : {rst}
@@ -175,7 +172,7 @@ async def monitor():
 {status}
 """
 
-                await bot.send_message(CHAT_ID, message)
+                await bot.send_message(CHAT_ID, msg)
 
         except Exception as e:
 
@@ -193,6 +190,4 @@ async def main():
     await monitor()
 
 
-if __name__ == "__main__":
-
-    asyncio.run(main())
+asyncio.run(main())
