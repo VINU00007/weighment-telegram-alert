@@ -13,6 +13,7 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
+
 LAST_UID = None
 
 
@@ -61,7 +62,7 @@ def parse_pdf(pdf_bytes):
         tare = tare_match.group(1)
         tare_time = tare_match.group(2) + " " + tare_match.group(3)
 
-    yard = "-"
+    yard_time = "-"
 
     try:
         if gross_time != "-" and tare_time != "-":
@@ -75,12 +76,11 @@ def parse_pdf(pdf_bytes):
             m = (diff.seconds % 3600) // 60
             s = diff.seconds % 60
 
-            yard = f"{h}h {m}m {s}s"
-
+            yard_time = f"{h}h {m}m {s}s"
     except:
         pass
 
-    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard
+    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard_time
 
 
 def check_mail():
@@ -130,6 +130,15 @@ async def monitor():
 
                 rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = data
 
+                status = ""
+                yard_status = ""
+
+                if net != "-":
+                    status = "🟢 STATUS : VEHICLE APPROVED FOR GATE PASS"
+                else:
+                    status = "🟡 STATUS : SECOND WEIGHMENT PENDING"
+                    yard_status = "⏱ Yard Status : VEHICLE IN YARD"
+
                 message = f"""
 ⚖️ WEIGHMENT ALERT
 
@@ -149,6 +158,9 @@ async def monitor():
 📦 Net : {net} Kg
 
 ⏱ Yard Time : {yard}
+
+{yard_status}
+{status}
 """
 
                 await bot.send_message(CHAT_ID, message)
