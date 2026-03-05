@@ -13,7 +13,6 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
-
 LAST_UID = None
 
 
@@ -25,7 +24,7 @@ def parse_pdf(pdf_bytes):
     for page in doc:
         text += page.get_text()
 
-    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
 
     def find(pattern):
         m = re.search(pattern, text, re.IGNORECASE)
@@ -33,9 +32,9 @@ def parse_pdf(pdf_bytes):
 
     rst = find(r"RST\s*:\s*(\d+)")
     vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
-    party = find(r"PARTY\s*NAME\s*([A-Z0-9\s]+)")
+    party = find(r"PARTY\s*NAME\s*:? ([A-Z\s]+?) PLACE")
     place = find(r"PLACE\s*:\s*([A-Z]+)")
-    material = find(r"MATERIAL\s*:\s*([A-Z\s]+)")
+    material = find(r"MATERIAL\s*:\s*([A-Z\s]+?) CELL")
 
     gross_match = re.search(
         r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
@@ -47,25 +46,26 @@ def parse_pdf(pdf_bytes):
         text,
     )
 
-    net_match = re.search(r"Net\.\s*:\s*(\d+)", text)
+    net = find(r"Net\.\s*:\s*(\d+)")
 
-    gross = gross_match.group(1) if gross_match else "-"
-    tare = tare_match.group(1) if tare_match else "-"
-    net = net_match.group(1) if net_match else "-"
-
+    gross = "-"
+    tare = "-"
     gross_time = "-"
     tare_time = "-"
 
     if gross_match:
+        gross = gross_match.group(1)
         gross_time = gross_match.group(2) + " " + gross_match.group(3)
 
     if tare_match:
+        tare = tare_match.group(1)
         tare_time = tare_match.group(2) + " " + tare_match.group(3)
 
     yard = "-"
 
     try:
         if gross_time != "-" and tare_time != "-":
+
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
             t = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
 
@@ -76,6 +76,7 @@ def parse_pdf(pdf_bytes):
             s = diff.seconds % 60
 
             yard = f"{h}h {m}m {s}s"
+
     except:
         pass
 
