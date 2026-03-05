@@ -4,6 +4,7 @@ import pdfplumber
 import re
 import os
 import asyncio
+import io
 from datetime import datetime
 from aiogram import Bot
 
@@ -19,10 +20,15 @@ sent_events = set()
 
 def parse_pdf(pdf_bytes):
 
-    with pdfplumber.open(pdf_bytes) as pdf:
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+
         text = ""
+
         for page in pdf.pages:
-            text += page.extract_text() + "\n"
+            page_text = page.extract_text()
+
+            if page_text:
+                text += page_text + "\n"
 
     text = re.sub(r"\s+", " ", text)
 
@@ -51,6 +57,7 @@ def parse_pdf(pdf_bytes):
     yard_time = "-"
 
     try:
+
         if gross_time != "-" and tare_time != "-":
 
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
@@ -63,6 +70,7 @@ def parse_pdf(pdf_bytes):
             s = diff.seconds % 60
 
             yard_time = f"{h}h {m}m {s}s"
+
     except:
         pass
 
@@ -94,6 +102,8 @@ def check_mail():
 
                 slips.append(parse_pdf(pdf_bytes))
 
+    mail.logout()
+
     return slips
 
 
@@ -117,9 +127,12 @@ async def monitor():
                 sent_events.add(event_id)
 
                 if net != "-":
+
                     status = "🟢 STATUS : VEHICLE APPROVED FOR GATE PASS"
                     yard_status = f"⏱ Yard Time : {yard}"
+
                 else:
+
                     status = "🟡 STATUS : SECOND WEIGHMENT PENDING"
                     yard_status = "⏱ Yard Status : VEHICLE IN YARD"
 
@@ -148,6 +161,7 @@ async def monitor():
                 await bot.send_message(CHAT_ID, message)
 
         except Exception as e:
+
             print("MAIL ERROR:", e)
 
         await asyncio.sleep(30)
@@ -163,4 +177,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
