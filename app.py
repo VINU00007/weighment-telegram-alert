@@ -35,9 +35,7 @@ def save_state():
 def parse_pdf(data):
 
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-
         text = ""
-
         for p in pdf.pages:
             t = p.extract_text()
             if t:
@@ -53,34 +51,50 @@ def parse_pdf(data):
     gross = "-"
     tare = "-"
     net = "-"
+    gross_time = "-"
+    tare_time = "-"
 
     for line in lines:
 
-        if "RST" in line:
-            rst = line.split(":")[-1].strip()
+        if "RST" in line and ":" in line:
+            rst = line.split(":")[1].strip()
 
-        if "Vehicle" in line:
-            vehicle = line.split(":")[-1].strip()
+        if "Vehicle" in line and ":" in line:
+            vehicle = line.split(":")[1].strip()
 
-        if "PARTY" in line:
-            party = line.split(":")[-1].strip()
+        if "PARTY" in line and ":" in line:
+            party = line.split(":")[1].strip()
 
-        if "PLACE" in line:
-            place = line.split(":")[-1].strip()
+        if "PLACE" in line and ":" in line:
+            place = line.split(":")[1].strip()
 
-        if "MATERIAL" in line:
-            material = line.split(":")[-1].strip()
+        if "MATERIAL" in line and ":" in line:
+            material = line.split(":")[1].strip()
 
         if "Gross" in line:
-            gross = line.split(":")[-1].replace("Kgs", "").strip()
+            parts = line.split()
+            for p in parts:
+                if p.isdigit():
+                    gross = p
+                    break
+            gross_time = " ".join(parts[-3:])
 
         if "Tare" in line:
-            tare = line.split(":")[-1].replace("Kgs", "").strip()
+            parts = line.split()
+            for p in parts:
+                if p.isdigit():
+                    tare = p
+                    break
+            tare_time = " ".join(parts[-3:])
 
         if "Net" in line:
-            net = line.split(":")[-1].replace("Kgs", "").strip()
+            parts = line.split()
+            for p in parts:
+                if p.isdigit():
+                    net = p
+                    break
 
-    return rst, vehicle, party, place, material, gross, tare, net
+    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time
 
 
 def read_mail():
@@ -127,23 +141,20 @@ async def monitor():
 
             for s in slips:
 
-                rst, vehicle, party, place, material, gross, tare, net = s
+                rst, vehicle, party, place, material, gross, tare, net, gt, tt = s
 
                 if net != "-":
                     key = f"{rst}_final"
+                    status = "🟢 STATUS : TRUCK READY FOR GATE PASS"
                 else:
                     key = f"{rst}_first"
+                    status = "🟡 STATUS : TRUCK ENTERED YARD"
 
                 if key in sent:
                     continue
 
                 sent.add(key)
                 save_state()
-
-                if net != "-":
-                    status = "🟢 STATUS : TRUCK READY FOR GATE PASS"
-                else:
-                    status = "🟡 STATUS : TRUCK ENTERED YARD"
 
                 msg = f"""
 ⚖️ WEIGHMENT ALERT
@@ -156,7 +167,11 @@ async def monitor():
 🌾 Material : {material}
 
 ⚖ Gross : {gross} Kg
+🕒 {gt}
+
 ⚖ Tare : {tare} Kg
+🕒 {tt}
+
 📦 Net : {net} Kg
 
 {status}
