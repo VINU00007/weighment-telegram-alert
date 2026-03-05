@@ -5,8 +5,8 @@ import os
 import asyncio
 import io
 import json
-from datetime import datetime
-from aiogram import Bot
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -14,6 +14,7 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
 bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 STATE_FILE = "processed.json"
 
@@ -22,6 +23,8 @@ if os.path.exists(STATE_FILE):
         sent = set(json.load(f))
 else:
     sent = set()
+
+last_weighments = []
 
 
 def save_state():
@@ -50,8 +53,6 @@ def parse_pdf(data):
     gross = "-"
     tare = "-"
     net = "-"
-    gross_time = "-"
-    tare_time = "-"
 
     for line in lines:
 
@@ -71,33 +72,15 @@ def parse_pdf(data):
             material = line.split(":")[-1].strip()
 
         if "Gross" in line:
-            gross = line.split(":")[-1].replace("Kgs","").strip()
+            gross = line.split(":")[-1].replace("Kgs", "").strip()
 
         if "Tare" in line:
-            tare = line.split(":")[-1].replace("Kgs","").strip()
+            tare = line.split(":")[-1].replace("Kgs", "").strip()
 
         if "Net" in line:
-            net = line.split(":")[-1].replace("Kgs","").strip()
+            net = line.split(":")[-1].replace("Kgs", "").strip()
 
-    yard = "-"
-
-    try:
-        if gross_time != "-" and tare_time != "-":
-
-            g = datetime.strptime(gross_time,"%d-%b-%y %I:%M:%S %p")
-            t = datetime.strptime(tare_time,"%d-%b-%y %I:%M:%S %p")
-
-            d = abs(g-t)
-
-            h = d.seconds//3600
-            m = (d.seconds%3600)//60
-
-            yard = f"{h}h {m}m"
-
-    except:
-        pass
-
-    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard
+    return rst, vehicle, party, place, material, gross, tare, net
 
 
 def read_mail():
@@ -108,7 +91,7 @@ def read_mail():
 
     r, d = mail.uid("search", None, "ALL")
 
-    ids = d[0].split()[-5:]
+    ids = d[0].split()[-100:]
 
     slips = []
 
@@ -130,6 +113,12 @@ def read_mail():
 
 async def monitor():
 
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Last 5 Weighments", callback_data="last5")]
+        ]
+    )
+
     while True:
 
         try:
@@ -138,7 +127,7 @@ async def monitor():
 
             for s in slips:
 
-                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = s
+                rst, vehicle, party, place, material, gross, tare, net = s
 
                 if net != "-":
                     key = f"{rst}_final"
@@ -152,14 +141,9 @@ async def monitor():
                 save_state()
 
                 if net != "-":
-
                     status = "🟢 STATUS : TRUCK READY FOR GATE PASS"
-                    yard_status = f"⏱ Yard Time : {yard}"
-
                 else:
-
                     status = "🟡 STATUS : TRUCK ENTERED YARD"
-                    yard_status = "⏱ Yard Status : VEHICLE IN YARD"
 
                 msg = f"""
 ⚖️ WEIGHMENT ALERT
@@ -173,14 +157,17 @@ async def monitor():
 
 ⚖ Gross : {gross} Kg
 ⚖ Tare : {tare} Kg
-
 📦 Net : {net} Kg
 
-{yard_status}
 {status}
 """
 
-                await bot.send_message(CHAT_ID, msg)
+                last_weighments.append(msg)
+
+                if len(last_weighments) > 20:
+                    last_weighments.pop(0)
+
+                await bot.send_message(CHAT_ID, msg, reply_markup=keyboard)
 
         except Exception as e:
             print("MAIL ERROR:", e)
@@ -188,13 +175,26 @@ async def monitor():
         await asyncio.sleep(20)
 
 
+@dp.callback_query(lambda c: c.data == "last5")
+async def show_last5(callback: types.CallbackQuery):
+
+    if not last_weighments:
+        await callback.message.answer("No weighments available")
+        return
+
+    text = "⚖️ LAST 5 WEIGHMENTS\n\n"
+
+    for w in last_weighments[-5:]:
+        text += w + "\n"
+
+    await callback.message.answer(text)
+
+
 async def main():
 
-    await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(monitor())
 
-    print("WEIGHMENT ALERT BOT RUNNING")
-
-    await monitor()
+    await dp.start_polling(bot)
 
 
 asyncio.run(main())
