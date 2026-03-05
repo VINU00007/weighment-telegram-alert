@@ -25,6 +25,7 @@ def parse_pdf(pdf_bytes):
     for page in doc:
         text += page.get_text()
 
+    raw = text
     text = re.sub(r"\s+", " ", text)
 
     def find(pattern):
@@ -33,50 +34,59 @@ def parse_pdf(pdf_bytes):
 
     rst = find(r"RST\s*:\s*(\d+)")
     vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
-    party = find(r"PARTY\s*NAME\s*:? ([A-Z\s]+?) PLACE")
+    party = find(r"PARTY\s*NAME\s*:? ([A-Za-z\s]+?) PLACE")
     place = find(r"PLACE\s*:\s*([A-Z]+)")
     material = find(r"MATERIAL\s*:\s*([A-Z\s]+?) CELL")
 
-    gross_match = re.search(
-        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-    )
-
-    tare_match = re.search(
-        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
-        text,
-    )
-
-    net = find(r"Net\.\s*:\s*(\d+)")
-
     gross = "-"
     tare = "-"
+    net = "-"
     gross_time = "-"
     tare_time = "-"
 
-    if gross_match:
-        gross = gross_match.group(1)
-        gross_time = gross_match.group(2) + " " + gross_match.group(3)
+    # ---- gross line ----
+    g = re.search(
+        r"Gross\.\s*:\s*(\d+)\s*Kgs?\s*(\d{2}-[A-Za-z]{3}-\d{2})?\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)?",
+        raw,
+    )
 
-    if tare_match:
-        tare = tare_match.group(1)
-        tare_time = tare_match.group(2) + " " + tare_match.group(3)
+    if g:
+        gross = g.group(1)
+        if g.group(2) and g.group(3):
+            gross_time = f"{g.group(2)} {g.group(3)}"
+
+    # ---- tare line ----
+    t = re.search(
+        r"Tare\.\s*:\s*(\d+)\s*Kgs?\s*(\d{2}-[A-Za-z]{3}-\d{2})?\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)?",
+        raw,
+    )
+
+    if t:
+        tare = t.group(1)
+        if t.group(2) and t.group(3):
+            tare_time = f"{t.group(2)} {t.group(3)}"
+
+    # ---- net ----
+    n = re.search(r"Net\.\s*:\s*(\d+)", raw)
+    if n:
+        net = n.group(1)
 
     yard_time = "-"
 
     try:
         if gross_time != "-" and tare_time != "-":
 
-            g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
-            t = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
+            gdt = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
+            tdt = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
 
-            diff = abs(g - t)
+            diff = abs(gdt - tdt)
 
             h = diff.seconds // 3600
             m = (diff.seconds % 3600) // 60
             s = diff.seconds % 60
 
             yard_time = f"{h}h {m}m {s}s"
+
     except:
         pass
 
