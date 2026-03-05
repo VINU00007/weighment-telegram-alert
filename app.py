@@ -14,7 +14,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 
-LAST_UID = None
+sent_events = set()
 
 
 def parse_pdf(pdf_bytes):
@@ -85,37 +85,30 @@ def parse_pdf(pdf_bytes):
 
 def check_mail():
 
-    global LAST_UID
-
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
     result, data = mail.uid("search", None, "ALL")
-    ids = data[0].split()
 
-    if not ids:
-        return None
+    ids = data[0].split()[-10:]
 
-    latest_uid = ids[-1]
+    slips = []
 
-    if latest_uid == LAST_UID:
-        return None
+    for uid in ids:
 
-    LAST_UID = latest_uid
+        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
+        msg = email.message_from_bytes(msg_data[0][1])
 
-    result, msg_data = mail.uid("fetch", latest_uid, "(RFC822)")
-    msg = email.message_from_bytes(msg_data[0][1])
+        for part in msg.walk():
 
-    for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
 
-        if part.get_content_type() == "application/pdf":
+                pdf_bytes = part.get_payload(decode=True)
 
-            pdf_bytes = part.get_payload(decode=True)
+                slips.append(parse_pdf(pdf_bytes))
 
-            return parse_pdf(pdf_bytes)
-
-    return None
+    return slips
 
 
 async def monitor():
@@ -124,17 +117,22 @@ async def monitor():
 
         try:
 
-            data = check_mail()
+            slips = check_mail()
 
-            if data:
+            for data in slips:
 
                 rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = data
 
-                status = ""
-                yard_status = ""
+                event_id = f"{rst}_{net}"
+
+                if event_id in sent_events:
+                    continue
+
+                sent_events.add(event_id)
 
                 if net != "-":
                     status = "🟢 STATUS : VEHICLE APPROVED FOR GATE PASS"
+                    yard_status = f"⏱ Yard Time : {yard}"
                 else:
                     status = "🟡 STATUS : SECOND WEIGHMENT PENDING"
                     yard_status = "⏱ Yard Status : VEHICLE IN YARD"
@@ -156,8 +154,6 @@ async def monitor():
 🕒 {tt}
 
 📦 Net : {net} Kg
-
-⏱ Yard Time : {yard}
 
 {yard_status}
 {status}
