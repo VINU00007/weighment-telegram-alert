@@ -1,13 +1,14 @@
 import imaplib
 import email
-import pdfplumber
 import os
 import asyncio
 import io
 import json
 import re
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import fitz  # PyMuPDF
+from aiogram import Bot, Dispatcher
+from aiogram.filters import Command
+from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -33,29 +34,28 @@ def save_state():
         json.dump(list(sent), f)
 
 
-def extract_between(text, start, end):
-    try:
-        return text.split(start)[1].split(end)[0].strip()
-    except:
-        return "-"
+def extract_pdf_text(data):
+    text = ""
+    doc = fitz.open(stream=data, filetype="pdf")
+    for page in doc:
+        text += page.get_text()
+    return " ".join(text.split())
+
+
+def get(pattern, text):
+    m = re.search(pattern, text, re.I)
+    return m.group(1).strip() if m else "-"
 
 
 def parse_pdf(data):
 
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
-        text = ""
-        for p in pdf.pages:
-            t = p.extract_text()
-            if t:
-                text += t + " "
+    text = extract_pdf_text(data)
 
-    text = " ".join(text.split())
-
-    rst = extract_between(text, "RST :", "Vehicle No")
-    vehicle = extract_between(text, "Vehicle No :", "PARTY NAME")
-    party = extract_between(text, "PARTY NAME :", "PLACE")
-    place = extract_between(text, "PLACE :", "MATERIAL")
-    material = extract_between(text, "MATERIAL :", "CELL")
+    rst = get(r"RST\s*:\s*(\d+)", text)
+    vehicle = get(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)", text)
+    party = get(r"PARTY\s*NAME\s*:\s*(.*?)\s+PLACE", text)
+    place = get(r"PLACE\s*:\s*(.*?)\s+MATERIAL", text)
+    material = get(r"MATERIAL\s*:\s*(.*?)\s+CELL", text)
 
     gross = "-"
     tare = "-"
@@ -63,12 +63,18 @@ def parse_pdf(data):
     gross_time = "-"
     tare_time = "-"
 
-    g = re.search(r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
+    g = re.search(
+        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
     if g:
         gross = g.group(1)
         gross_time = f"{g.group(2)} {g.group(3)}"
 
-    t = re.search(r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)", text)
+    t = re.search(
+        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-\w{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
     if t:
         tare = t.group(1)
         tare_time = f"{t.group(2)} {t.group(3)}"
@@ -92,25 +98,19 @@ def read_mail():
     slips = []
 
     for i in ids:
+
         r, data = mail.uid("fetch", i, "(RFC822)")
         msg = email.message_from_bytes(data[0][1])
 
-        for p in msg.walk():
-            if p.get_content_type() == "application/pdf":
-                slips.append(parse_pdf(p.get_payload(decode=True)))
+        for part in msg.walk():
+            if part.get_content_type() == "application/pdf":
+                slips.append(parse_pdf(part.get_payload(decode=True)))
 
     mail.logout()
-
     return slips
 
 
 async def monitor():
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Last 5 Weighments", callback_data="last5")]
-        ]
-    )
 
     while True:
 
@@ -161,7 +161,7 @@ async def monitor():
                 if len(last_weighments) > 20:
                     last_weighments.pop(0)
 
-                await bot.send_message(CHAT_ID, msg, reply_markup=keyboard)
+                await bot.send_message(CHAT_ID, msg)
 
         except Exception as e:
             print("MAIL ERROR:", e)
@@ -169,15 +169,19 @@ async def monitor():
         await asyncio.sleep(20)
 
 
-@dp.callback_query(lambda c: c.data == "last5")
-async def show_last5(callback: types.CallbackQuery):
+@dp.message(Command("last5"))
+async def last5(message: Message):
+
+    if not last_weighments:
+        await message.answer("No weighments available")
+        return
 
     text = "⚖️ LAST 5 WEIGHMENTS\n\n"
 
     for w in last_weighments[-5:]:
         text += w + "\n"
 
-    await callback.message.answer(text)
+    await message.answer(text)
 
 
 async def main():
@@ -186,4 +190,5 @@ async def main():
     await dp.start_polling(bot)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
