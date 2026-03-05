@@ -5,8 +5,9 @@ import re
 import os
 import asyncio
 from datetime import datetime
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
+from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -16,11 +17,11 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 CHAT_ID = None
-last_uid = None
+LAST_EMAIL = None
 
 
 # -------------------------
-# PDF PARSER
+# PARSE PDF
 # -------------------------
 def parse_pdf(pdf_bytes):
 
@@ -44,18 +45,14 @@ def parse_pdf(pdf_bytes):
     tare = find(r"Tare\.\s*:\s*(\d+)")
     net = find(r"Net\.\s*:\s*(\d+)")
 
-    times = re.findall(r"\d{2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text)
+    times = re.findall(
+        r"\d{2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text
+    )
 
-    gross_time = "-"
-    tare_time = "-"
+    gross_time = times[0] if len(times) >= 1 else "-"
+    tare_time = times[1] if len(times) >= 2 else "-"
 
-    if len(times) >= 1:
-        gross_time = times[0]
-
-    if len(times) >= 2:
-        tare_time = times[1]
-
-    yard_time = "-"
+    yard = "-"
 
     try:
         if gross_time != "-" and tare_time != "-":
@@ -65,120 +62,104 @@ def parse_pdf(pdf_bytes):
 
             diff = abs(t1 - t2)
 
-            hours = diff.seconds // 3600
-            minutes = (diff.seconds % 3600) // 60
-            seconds = diff.seconds % 60
+            h = diff.seconds // 3600
+            m = (diff.seconds % 3600) // 60
+            s = diff.seconds % 60
 
-            yard_time = f"{hours}h {minutes}m {seconds}s"
+            yard = f"{h}h {m}m {s}s"
 
     except:
         pass
 
-    return {
-        "rst": rst,
-        "vehicle": vehicle,
-        "party": party,
-        "place": place,
-        "material": material,
-        "gross": gross,
-        "tare": tare,
-        "net": net,
-        "gross_time": gross_time,
-        "tare_time": tare_time,
-        "yard_time": yard_time
-    }
+    return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time, yard
 
 
 # -------------------------
-# EMAIL CHECKER
+# CHECK EMAIL
 # -------------------------
 def check_email():
 
-    global last_uid
+    global LAST_EMAIL
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    result, data = mail.uid("search", None, "ALL")
+    result, data = mail.search(None, "ALL")
     ids = data[0].split()
 
     if not ids:
-        return []
+        return None
 
-    if last_uid is None:
-        last_uid = ids[-1]
-        return []
+    latest_id = ids[-1]
 
-    new_ids = [i for i in ids if int(i) > int(last_uid)]
+    if LAST_EMAIL == latest_id:
+        return None
 
-    slips = []
+    LAST_EMAIL = latest_id
 
-    for uid in new_ids:
+    result, msg_data = mail.fetch(latest_id, "(RFC822)")
+    msg = email.message_from_bytes(msg_data[0][1])
 
-        result, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        msg = email.message_from_bytes(msg_data[0][1])
+    for part in msg.walk():
 
-        for part in msg.walk():
+        if part.get_content_type() == "application/pdf":
 
-            if part.get_content_type() == "application/pdf":
+            pdf = part.get_payload(decode=True)
+            return parse_pdf(pdf)
 
-                pdf_bytes = part.get_payload(decode=True)
-                slip = parse_pdf(pdf_bytes)
-                slips.append(slip)
-
-        last_uid = uid
-
-    mail.logout()
-
-    return slips
+    return None
 
 
 # -------------------------
-# MONITOR
+# MONITOR LOOP
 # -------------------------
 async def monitor():
 
     while True:
 
-        slips = check_email()
+        try:
 
-        for s in slips:
+            slip = check_email()
 
-            if CHAT_ID is None:
-                continue
+            if slip and CHAT_ID:
 
-            msg = f"""
+                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = slip
+
+                msg = f"""
 ⚖️ WEIGHMENT SLIP
 
-RST : {s['rst']}
-🚛 Vehicle : {s['vehicle']}
+RST : {rst}
+🚛 Vehicle : {vehicle}
 
-🏢 Party : {s['party']}
-📍 Place : {s['place']}
-🌾 Material : {s['material']}
+🏢 Party : {party}
+📍 Place : {place}
+🌾 Material : {material}
 
-⚖ Gross : {s['gross']} Kg
-🕒 {s['gross_time']}
+⚖ Gross : {gross} Kg
+🕒 {gt}
 
-⚖ Tare : {s['tare']} Kg
-🕒 {s['tare_time']}
+⚖ Tare : {tare} Kg
+🕒 {tt}
 
-📦 Net : {s['net']} Kg
+📦 Net : {net} Kg
 
-⏱ Yard Time : {s['yard_time']}
+⏱ Yard Time : {yard}
 """
 
-            await bot.send_message(CHAT_ID, msg)
+                await bot.send_message(CHAT_ID, msg)
 
-        await asyncio.sleep(20)
+        except Exception as e:
+            print("ERROR:", e)
+
+        await asyncio.sleep(30)
 
 
 # -------------------------
-# START
+# START COMMAND
 # -------------------------
 @dp.message(Command("start"))
-async def start(msg: types.Message):
+async def start(msg: Message):
 
     global CHAT_ID
     CHAT_ID = msg.chat.id
