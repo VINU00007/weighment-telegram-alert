@@ -6,22 +6,20 @@ import os
 import asyncio
 from datetime import datetime
 from aiogram import Bot, Dispatcher
-from aiogram.filters import Command
-from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
+CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-CHAT_ID = None
-LAST_EMAIL = None
+LAST_UID = None
 
 
 # -------------------------
-# PARSE PDF
+# PDF PARSER
 # -------------------------
 def parse_pdf(pdf_bytes):
 
@@ -41,20 +39,21 @@ def parse_pdf(pdf_bytes):
     place = find(r"PLACE\s*:\s*(.+)")
     material = find(r"MATERIAL\s*:\s*(.+)")
 
-    gross = find(r"Gross\.\s*:\s*(\d+)")
-    tare = find(r"Tare\.\s*:\s*(\d+)")
-    net = find(r"Net\.\s*:\s*(\d+)")
+    gross = find(r"Gross.*?:\s*(\d+)")
+    tare = find(r"Tare.*?:\s*(\d+)")
+    net = find(r"Net.*?:\s*(\d+)")
 
     times = re.findall(
         r"\d{2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text
     )
 
-    gross_time = times[0] if len(times) >= 1 else "-"
-    tare_time = times[1] if len(times) >= 2 else "-"
+    gross_time = times[0] if len(times) > 0 else "-"
+    tare_time = times[1] if len(times) > 1 else "-"
 
     yard = "-"
 
     try:
+
         if gross_time != "-" and tare_time != "-":
 
             t1 = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
@@ -75,38 +74,39 @@ def parse_pdf(pdf_bytes):
 
 
 # -------------------------
-# CHECK EMAIL
+# EMAIL CHECK
 # -------------------------
-def check_email():
+def check_mail():
 
-    global LAST_EMAIL
+    global LAST_UID
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
 
-    result, data = mail.search(None, "ALL")
+    result, data = mail.uid("search", None, "ALL")
     ids = data[0].split()
 
     if not ids:
         return None
 
-    latest_id = ids[-1]
+    latest_uid = ids[-1]
 
-    if LAST_EMAIL == latest_id:
+    if latest_uid == LAST_UID:
         return None
 
-    LAST_EMAIL = latest_id
+    LAST_UID = latest_uid
 
-    result, msg_data = mail.fetch(latest_id, "(RFC822)")
+    result, msg_data = mail.uid("fetch", latest_uid, "(RFC822)")
     msg = email.message_from_bytes(msg_data[0][1])
 
     for part in msg.walk():
 
         if part.get_content_type() == "application/pdf":
 
-            pdf = part.get_payload(decode=True)
-            return parse_pdf(pdf)
+            pdf_bytes = part.get_payload(decode=True)
+
+            return parse_pdf(pdf_bytes)
 
     return None
 
@@ -120,16 +120,16 @@ async def monitor():
 
         try:
 
-            slip = check_email()
+            data = check_mail()
 
-            if slip and CHAT_ID:
+            if data:
 
-                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = slip
+                rst, vehicle, party, place, material, gross, tare, net, gt, tt, yard = data
 
-                msg = f"""
-⚖️ WEIGHMENT SLIP
+                message = f"""
+⚖️ WEIGHMENT ALERT
 
-RST : {rst}
+🧾 RST : {rst}
 🚛 Vehicle : {vehicle}
 
 🏢 Party : {party}
@@ -147,24 +147,13 @@ RST : {rst}
 ⏱ Yard Time : {yard}
 """
 
-                await bot.send_message(CHAT_ID, msg)
+                await bot.send_message(CHAT_ID, message)
 
         except Exception as e:
-            print("ERROR:", e)
+
+            print("MAIL ERROR:", e)
 
         await asyncio.sleep(30)
-
-
-# -------------------------
-# START COMMAND
-# -------------------------
-@dp.message(Command("start"))
-async def start(msg: Message):
-
-    global CHAT_ID
-    CHAT_ID = msg.chat.id
-
-    await msg.answer("✅ Weighment alert bot activated.")
 
 
 # -------------------------
@@ -172,8 +161,14 @@ async def start(msg: Message):
 # -------------------------
 async def main():
 
+    await bot.delete_webhook(drop_pending_updates=True)
+
     asyncio.create_task(monitor())
-    await dp.start_polling(bot)
+
+    print("BOT RUNNING — WEIGHMENT PARSER ACTIVE")
+
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
