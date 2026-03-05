@@ -25,10 +25,9 @@ def parse_pdf(pdf_bytes):
         text = ""
 
         for page in pdf.pages:
-            page_text = page.extract_text()
-
-            if page_text:
-                text += page_text + "\n"
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
 
     text = re.sub(r"\s+", " ", text)
 
@@ -42,22 +41,34 @@ def parse_pdf(pdf_bytes):
     place = find(r"PLACE\s*:\s*([A-Z]+)")
     material = find(r"MATERIAL\s*:\s*(.*?) CELL")
 
-    gross = find(r"Gross\.\s*:\s*(\d+)")
-    tare = find(r"Tare\.\s*:\s*(\d+)")
+    gross_match = re.search(
+        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
+
+    tare_match = re.search(
+        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        text,
+    )
+
     net = find(r"Net\.\s*:\s*(\d+)")
 
-    gross_time = find(
-        r"Gross\.\s*:\s*\d+\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2}\s*\d{1,2}:\d{2}:\d{2}\s*[AP]M)"
-    )
+    gross = "-"
+    tare = "-"
+    gross_time = "-"
+    tare_time = "-"
 
-    tare_time = find(
-        r"Tare\.\s*:\s*\d+\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2}\s*\d{1,2}:\d{2}:\d{2}\s*[AP]M)"
-    )
+    if gross_match:
+        gross = gross_match.group(1)
+        gross_time = f"{gross_match.group(2)} {gross_match.group(3)}"
+
+    if tare_match:
+        tare = tare_match.group(1)
+        tare_time = f"{tare_match.group(2)} {tare_match.group(3)}"
 
     yard_time = "-"
 
     try:
-
         if gross_time != "-" and tare_time != "-":
 
             g = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
@@ -67,9 +78,8 @@ def parse_pdf(pdf_bytes):
 
             h = diff.seconds // 3600
             m = (diff.seconds % 3600) // 60
-            s = diff.seconds % 60
 
-            yard_time = f"{h}h {m}m {s}s"
+            yard_time = f"{h}h {m}m"
 
     except:
         pass
