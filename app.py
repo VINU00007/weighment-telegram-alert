@@ -5,7 +5,7 @@ import re
 import os
 import asyncio
 from datetime import datetime
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_USER = os.getenv("EMAIL_USER")
@@ -13,7 +13,6 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 LAST_UID = None
 
@@ -24,6 +23,7 @@ LAST_UID = None
 def parse_pdf(pdf_bytes):
 
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
     text = ""
 
     for page in doc:
@@ -34,21 +34,29 @@ def parse_pdf(pdf_bytes):
         return m.group(1).strip() if m else "-"
 
     rst = find(r"RST\s*:\s*(\d+)")
+
     vehicle = find(r"Vehicle\s*No\s*:\s*([A-Z0-9]+)")
+
     party = find(r"PARTY\s*NAME\s*:\s*(.+)")
+
     place = find(r"PLACE\s*:\s*(.+)")
+
     material = find(r"MATERIAL\s*:\s*(.+)")
 
-    gross = find(r"Gross.*?:\s*(\d+)")
-    tare = find(r"Tare.*?:\s*(\d+)")
-    net = find(r"Net.*?:\s*(\d+)")
+    gross = find(r"Gross\s*Wt\s*[:\-]?\s*(\d+)")
+
+    tare = find(r"Tare\s*Wt\s*[:\-]?\s*(\d+)")
+
+    net = find(r"Net\s*Wt\s*[:\-]?\s*(\d+)")
 
     times = re.findall(
-        r"\d{2}-[A-Za-z]{3}-\d{2}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M", text
+        r"\d{2}-[A-Za-z]{3}-\d{2}\s*\n?\s*\d{1,2}:\d{2}:\d{2}\s*[AP]M",
+        text
     )
 
-    gross_time = times[0] if len(times) > 0 else "-"
-    tare_time = times[1] if len(times) > 1 else "-"
+    gross_time = times[0].replace("\n", " ") if len(times) > 0 else "-"
+
+    tare_time = times[1].replace("\n", " ") if len(times) > 1 else "-"
 
     yard = "-"
 
@@ -57,12 +65,15 @@ def parse_pdf(pdf_bytes):
         if gross_time != "-" and tare_time != "-":
 
             t1 = datetime.strptime(gross_time, "%d-%b-%y %I:%M:%S %p")
+
             t2 = datetime.strptime(tare_time, "%d-%b-%y %I:%M:%S %p")
 
             diff = abs(t1 - t2)
 
             h = diff.seconds // 3600
+
             m = (diff.seconds % 3600) // 60
+
             s = diff.seconds % 60
 
             yard = f"{h}h {m}m {s}s"
@@ -74,17 +85,20 @@ def parse_pdf(pdf_bytes):
 
 
 # -------------------------
-# EMAIL CHECK
+# CHECK EMAIL
 # -------------------------
 def check_mail():
 
     global LAST_UID
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
+
     mail.login(EMAIL_USER, EMAIL_PASS)
+
     mail.select("inbox")
 
     result, data = mail.uid("search", None, "ALL")
+
     ids = data[0].split()
 
     if not ids:
@@ -98,6 +112,7 @@ def check_mail():
     LAST_UID = latest_uid
 
     result, msg_data = mail.uid("fetch", latest_uid, "(RFC822)")
+
     msg = email.message_from_bytes(msg_data[0][1])
 
     for part in msg.walk():
@@ -163,13 +178,11 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    asyncio.create_task(monitor())
-
     print("BOT RUNNING — WEIGHMENT PARSER ACTIVE")
 
-    while True:
-        await asyncio.sleep(3600)
+    await monitor()
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
