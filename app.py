@@ -49,8 +49,9 @@ def parse_pdf(data):
     tare_time = "-"
 
     g = re.search(
-        r"Gross\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        r"Gross\.\s*:\s*(\d+)\s*Kgs.*?(\d{2}-[A-Za-z]{3}-\d{2}).*?(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
         text,
+        re.S,
     )
 
     if g:
@@ -58,8 +59,9 @@ def parse_pdf(data):
         gross_time = f"{g.group(2)} {g.group(3)}"
 
     t = re.search(
-        r"Tare\.\s*:\s*(\d+)\s*Kgs\s*(\d{2}-[A-Za-z]{3}-\d{2})\s*(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
+        r"Tare\.\s*:\s*(\d+)\s*Kgs.*?(\d{2}-[A-Za-z]{3}-\d{2}).*?(\d{1,2}:\d{2}:\d{2}\s*[AP]M)",
         text,
+        re.S,
     )
 
     if t:
