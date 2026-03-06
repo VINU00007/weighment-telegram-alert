@@ -91,26 +91,7 @@ def parse_pdf(data):
     return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time
 
 
-def process_email(msg):
-
-    date = parsedate_to_datetime(msg["Date"])
-
-    slips = []
-
-    for part in msg.walk():
-
-        if part.get_content_type() == "application/pdf":
-
-            pdf_data = part.get_payload(decode=True)
-
-            parsed = parse_pdf(pdf_data)
-
-            slips.append((date, parsed))
-
-    return slips
-
-
-async def email_idle_monitor():
+async def monitor():
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(EMAIL_USER, EMAIL_PASS)
@@ -120,13 +101,9 @@ async def email_idle_monitor():
 
         try:
 
-            mail.idle()
-            mail.idle_check(timeout=300)
-            mail.idle_done()
-
             r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
 
-            ids = d[0].split()[-10:]
+            ids = d[0].split()[-20:]
 
             slips = []
 
@@ -135,7 +112,17 @@ async def email_idle_monitor():
                 r, data = mail.uid("fetch", i, "(RFC822)")
                 msg = email.message_from_bytes(data[0][1])
 
-                slips.extend(process_email(msg))
+                date = parsedate_to_datetime(msg["Date"])
+
+                for part in msg.walk():
+
+                    if part.get_content_type() == "application/pdf":
+
+                        pdf_data = part.get_payload(decode=True)
+
+                        parsed = parse_pdf(pdf_data)
+
+                        slips.append((date, parsed))
 
             slips.sort(key=lambda x: x[0])
 
@@ -188,15 +175,11 @@ async def email_idle_monitor():
 
             print("MAIL ERROR:", e)
 
-            await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
 
 @dp.message(Command("last5"))
 async def last5(message: Message):
-
-    if not last_weighments:
-        await message.answer("No weighments available")
-        return
 
     text = "⚖️ LAST 5 WEIGHMENTS\n\n"
 
@@ -210,7 +193,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    asyncio.create_task(email_idle_monitor())
+    asyncio.create_task(monitor())
 
     await dp.start_polling(bot)
 
