@@ -6,7 +6,6 @@ import json
 import re
 import fitz
 from email.utils import parsedate_to_datetime
-from aiohttp import ClientTimeout
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -16,13 +15,10 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
+# change this to your weighbridge sender
 WEIGHBRIDGE_EMAIL = "weighbridge@email.com"
 
-bot = Bot(
-    token=BOT_TOKEN,
-    timeout=ClientTimeout(total=60)
-)
-
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 STATE_FILE = "processed.json"
@@ -202,7 +198,7 @@ async def last5(message: Message):
 
 async def main():
 
-    # Prevent Telegram conflict errors
+    # prevent polling conflict errors
     await bot.delete_webhook(drop_pending_updates=True)
 
     asyncio.create_task(monitor())
