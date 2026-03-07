@@ -93,13 +93,13 @@ def parse_pdf(data):
 
 async def monitor():
 
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(EMAIL_USER, EMAIL_PASS)
-    mail.select("inbox")
-
     while True:
 
         try:
+
+            mail = imaplib.IMAP4_SSL("imap.gmail.com")
+            mail.login(EMAIL_USER, EMAIL_PASS)
+            mail.select("inbox")
 
             r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
 
@@ -123,6 +123,8 @@ async def monitor():
                         parsed = parse_pdf(pdf_data)
 
                         slips.append((date, parsed))
+
+            mail.logout()
 
             slips.sort(key=lambda x: x[0])
 
@@ -181,6 +183,10 @@ async def monitor():
 @dp.message(Command("last5"))
 async def last5(message: Message):
 
+    if not last_weighments:
+        await message.answer("No weighments available")
+        return
+
     text = "⚖️ LAST 5 WEIGHMENTS\n\n"
 
     for w in last_weighments[-5:]:
@@ -200,4 +206,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
