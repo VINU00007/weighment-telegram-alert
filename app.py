@@ -15,7 +15,6 @@ EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = int(os.getenv("CHAT_ID"))
 
-# change this to your weighbridge sender
 WEIGHBRIDGE_EMAIL = "weighbridge@email.com"
 
 bot = Bot(token=BOT_TOKEN)
@@ -90,6 +89,17 @@ def parse_pdf(data):
         net = n.group(1)
 
     return rst, vehicle, party, place, material, gross, tare, net, gross_time, tare_time
+
+
+async def safe_send(text):
+
+    for _ in range(3):
+        try:
+            await bot.send_message(CHAT_ID, text)
+            return
+        except Exception as e:
+            print("Telegram send retry:", e)
+            await asyncio.sleep(2)
 
 
 async def monitor():
@@ -172,11 +182,12 @@ async def monitor():
                 if len(last_weighments) > 20:
                     last_weighments.pop(0)
 
-                await bot.send_message(CHAT_ID, msg)
+                await safe_send(msg)
 
         except Exception as e:
 
             print("MAIL ERROR:", e)
+            await asyncio.sleep(5)
 
         await asyncio.sleep(10)
 
@@ -198,7 +209,6 @@ async def last5(message: Message):
 
 async def main():
 
-    # prevent polling conflict errors
     await bot.delete_webhook(drop_pending_updates=True)
 
     asyncio.create_task(monitor())
