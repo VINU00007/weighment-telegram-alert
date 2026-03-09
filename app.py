@@ -11,11 +11,9 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_USER = os.getenv("EMAIL_USER")   # should be srisvtagrori@gmail.com
 EMAIL_PASS = os.getenv("EMAIL_PASS")
 CHAT_ID = int(os.getenv("CHAT_ID"))
-
-WEIGHBRIDGE_EMAIL = "weighbridge@email.com"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -98,7 +96,7 @@ async def safe_send(text):
             await bot.send_message(CHAT_ID, text)
             return
         except Exception as e:
-            print("Telegram send retry:", e)
+            print("Telegram retry:", e)
             await asyncio.sleep(2)
 
 
@@ -112,7 +110,7 @@ async def monitor():
             mail.login(EMAIL_USER, EMAIL_PASS)
             mail.select("inbox")
 
-            r, d = mail.uid("search", None, f'(FROM "{WEIGHBRIDGE_EMAIL}")')
+            r, d = mail.uid("search", None, "ALL")
 
             ids = d[0].split()[-20:]
 
