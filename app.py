@@ -131,6 +131,11 @@ def process_weighment(info):
             "high": net_kg > 20000
         })
 
+    # ===== STATUS MESSAGE FIX =====
+    status_text = "*▣ ENTRY LOGGED*"
+    if net_kg > 0:
+        status_text += "\n*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
+
     message = (
         "⚖️  WEIGHMENT ALERT  ⚖️\n\n"
         f"🧾 RST : {info['RST']}   🚛 {vehicle}\n"
@@ -146,8 +151,7 @@ def process_weighment(info):
         f"🟡 YARD TIME : {duration_text}\n"
         f"{high_load_flag}"
         f"{repeat_flag}\n"
-        "*▣ ENTRY LOGGED*\n"
-        "*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
+        f"{status_text}"
     )
 
     send_telegram(message.strip())
