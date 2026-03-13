@@ -20,7 +20,6 @@ KEYWORDS = ["WEIGHMENT"]
 # ===== In-Memory Storage =====
 vehicle_log = {}
 completed_weighments = []
-last_hour_sent = None
 
 
 # ================= TIME (IST) =================
@@ -154,47 +153,6 @@ def process_weighment(info):
     send_telegram(message.strip())
 
 
-# ================= HOURLY STATUS =================
-def send_hourly_status():
-    global completed_weighments
-
-    now = now_ist()
-    one_hour_ago = now - timedelta(hours=1)
-    hour_label = now.strftime("%I %p").lstrip("0")
-
-    recent = [w for w in completed_weighments if one_hour_ago <= w["time"] <= now]
-
-    if not recent:
-        message = (
-            f"⏱ HOURLY STATUS – {hour_label}\n\n"
-            "No Weighments Completed In The Past Hour."
-        )
-        send_telegram(message)
-        return
-
-    total_net = sum(w["net"] for w in recent)
-    total_loads = len(recent)
-    high_count = sum(1 for w in recent if w["high"])
-
-    material_totals = {}
-    for w in recent:
-        material_totals[w["material"]] = material_totals.get(w["material"], 0) + w["net"]
-
-    material_lines = "\n".join(
-        f"{m} : {material_totals[m]:,} Kg" for m in material_totals
-    )
-
-    message = (
-        f"⏱ HOURLY STATUS – {hour_label}\n\n"
-        f"Weighments Completed : {total_loads}\n"
-        f"Total Net This Hour  : {total_net:,} Kg\n\n"
-        f"{material_lines}\n\n"
-        f"⬆ High Loads : {high_count}"
-    )
-
-    send_telegram(message)
-
-
 # ================= EMAIL CHECK =================
 def check_mail():
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -236,14 +194,6 @@ def check_mail():
 if __name__ == "__main__":
     while True:
         try:
-            now = now_ist()
-
-            if now.minute == 0:
-                hour_marker = now.strftime("%Y-%m-%d %H")
-                if hour_marker != last_hour_sent:
-                    send_hourly_status()
-                    last_hour_sent = hour_marker
-
             check_mail()
 
         except Exception as e:
