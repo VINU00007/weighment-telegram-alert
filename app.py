@@ -8,7 +8,6 @@ import re
 from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
-import threading
 import asyncio
 
 from telegram import Update
@@ -213,38 +212,22 @@ async def rate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a weighment message with: rate 250")
         return
 
     try:
-
         rate = float(text.split()[1])
 
     except:
-
-        await update.message.reply_text("Use: rate 250")
-
+        await update.message.reply_text("Use format: rate 250")
         return
 
     original = update.message.reply_to_message.text
 
     net = re.search(r"NET LOAD\s*:\s*(\d+)", original)
 
-    rst = re.search(r"RST\s*:\s*(\d+)", original)
-
-    vehicle = re.search(r"🚛\s*([A-Z0-9\-]+)", original)
-
-    party = re.search(r"👤\s*(.+)", original)
-
-    material = re.search(r"MATERIAL\s*:\s*(.+)", original)
-
-    bags = re.search(r"BAGS\s*:\s*(\d+)", original)
-
-    time_match = re.search(r"⟪ OUT ⟫\s*(.+)", original)
-
     if not net:
-
         await update.message.reply_text("Net weight not found.")
-
         return
 
     net_kg = int(net.group(1))
@@ -256,18 +239,6 @@ async def rate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
 
         "💰 PAYMENT CALCULATION\n\n"
-
-        f"🧾 RST No : {rst.group(1) if rst else '-'}\n"
-
-        f"🚛 Vehicle : {vehicle.group(1) if vehicle else '-'}\n\n"
-
-        f"👤 Party : {party.group(1) if party else '-'}\n"
-
-        f"🌾 Material : {material.group(1) if material else '-'}\n"
-
-        f"📦 Bags : {bags.group(1) if bags else '-'}\n\n"
-
-        f"🕒 Weighment Time : {time_match.group(1) if time_match else '-'}\n\n"
 
         f"⚖ Net Weight : {net_kg:,} Kg\n"
 
@@ -286,11 +257,71 @@ async def rate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
-# ================= TELEGRAM LISTENER =================
-def start_telegram_listener():
+# ================= EMAIL LOOP =================
+async def gmail_loop():
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    while True:
+
+        try:
+
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+
+            mail.login(EMAIL_USER, EMAIL_PASS)
+
+            mail.select("inbox")
+
+            status, messages = mail.search(None, "(UNSEEN)")
+
+            mail_ids = messages[0].split()
+
+            for mail_id in mail_ids:
+
+                status, msg_data = mail.fetch(mail_id, "(RFC822)")
+
+                raw_email = msg_data[0][1]
+
+                msg = email.message_from_bytes(raw_email)
+
+                subject = safe_decode(msg.get("Subject"))
+
+                if not any(k in subject.upper() for k in KEYWORDS):
+
+                    mail.store(mail_id, "+FLAGS", "\\Seen")
+
+                    continue
+
+                for part in msg.walk():
+
+                    filename = part.get_filename()
+
+                    content_type = part.get_content_type()
+
+                    if (
+                        (filename and filename.lower().endswith(".pdf"))
+                        or content_type == "application/pdf"
+                    ):
+
+                        data = part.get_payload(decode=True)
+
+                        if data:
+
+                            info = extract_from_pdf_bytes(data)
+
+                            process_weighment(info)
+
+                mail.store(mail_id, "+FLAGS", "\\Seen")
+
+            mail.logout()
+
+        except Exception as e:
+
+            print("Email Error:", e)
+
+        await asyncio.sleep(30)
+
+
+# ================= MAIN =================
+async def main():
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -298,75 +329,10 @@ def start_telegram_listener():
         MessageHandler(filters.TEXT & ~filters.COMMAND, rate_reply)
     )
 
-    app.run_polling()
+    asyncio.create_task(gmail_loop())
+
+    await app.run_polling()
 
 
-# ================= EMAIL CHECK =================
-def check_mail():
-
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-
-    mail.login(EMAIL_USER, EMAIL_PASS)
-
-    mail.select("inbox")
-
-    status, messages = mail.search(None, "(UNSEEN)")
-
-    mail_ids = messages[0].split()
-
-    for mail_id in mail_ids:
-
-        status, msg_data = mail.fetch(mail_id, "(RFC822)")
-
-        raw_email = msg_data[0][1]
-
-        msg = email.message_from_bytes(raw_email)
-
-        subject = safe_decode(msg.get("Subject"))
-
-        if not any(k in subject.upper() for k in KEYWORDS):
-
-            mail.store(mail_id, "+FLAGS", "\\Seen")
-
-            continue
-
-        for part in msg.walk():
-
-            filename = part.get_filename()
-
-            content_type = part.get_content_type()
-
-            if (
-                (filename and filename.lower().endswith(".pdf"))
-                or content_type == "application/pdf"
-            ):
-
-                data = part.get_payload(decode=True)
-
-                if data:
-
-                    info = extract_from_pdf_bytes(data)
-
-                    process_weighment(info)
-
-        mail.store(mail_id, "+FLAGS", "\\Seen")
-
-    mail.logout()
-
-
-# ================= MAIN =================
 if __name__ == "__main__":
-
-    threading.Thread(target=start_telegram_listener).start()
-
-    while True:
-
-        try:
-
-            check_mail()
-
-        except Exception as e:
-
-            print("Error:", e)
-
-        time.sleep(30)
+    asyncio.run(main())
