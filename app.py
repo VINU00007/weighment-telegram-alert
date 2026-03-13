@@ -8,6 +8,11 @@ import re
 from io import BytesIO
 from datetime import datetime, timedelta
 import pdfplumber
+import threading
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+
 
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASS = os.getenv("EMAIL_PASS")
@@ -100,7 +105,6 @@ def extract_from_pdf_bytes(pdf_bytes: bytes) -> dict:
 
 # ================= PROCESS WEIGHMENT =================
 def process_weighment(info):
-    global vehicle_log, completed_weighments
 
     today_key = now_ist().strftime("%Y-%m-%d")
     if today_key not in vehicle_log:
@@ -123,15 +127,6 @@ def process_weighment(info):
     repeat_flag = "🔁 REPEAT VEHICLE\n" if vehicle in vehicle_log[today_key] else ""
     vehicle_log[today_key].add(vehicle)
 
-    if exit_dt_obj:
-        completed_weighments.append({
-            "time": exit_dt_obj,
-            "net": net_kg,
-            "material": material,
-            "high": net_kg > 20000
-        })
-
-    # ===== STATUS MESSAGE FIX =====
     status_text = "*▣ ENTRY LOGGED*"
     if net_kg > 0:
         status_text += "\n*▣ LOAD LOCKED & APPROVED FOR GATE PASS*"
@@ -157,8 +152,83 @@ def process_weighment(info):
     send_telegram(message.strip())
 
 
+# ================= RATE REPLY HANDLER =================
+async def rate_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    text = update.message.text.lower()
+
+    if not text.startswith("rate"):
+        return
+
+    if not update.message.reply_to_message:
+        return
+
+    try:
+        rate = float(text.split()[1])
+    except:
+        await update.message.reply_text("Use format: rate 250")
+        return
+
+    original = update.message.reply_to_message.text
+
+    net = re.search(r"NET LOAD\s*:\s*(\d+)", original)
+    rst = re.search(r"RST\s*:\s*(\d+)", original)
+    vehicle = re.search(r"🚛\s*([A-Z0-9\-]+)", original)
+
+    party = re.search(r"👤\s*(.+)", original)
+    material = re.search(r"MATERIAL\s*:\s*(.+)", original)
+    bags = re.search(r"BAGS\s*:\s*(\d+)", original)
+    time_match = re.search(r"⟪ OUT ⟫\s*(.+)", original)
+
+    if not net:
+        await update.message.reply_text("Net weight not found.")
+        return
+
+    net_kg = int(net.group(1))
+    quintals = net_kg / 100
+    total = int(quintals * rate)
+
+    vehicle = vehicle.group(1) if vehicle else "-"
+    rst = rst.group(1) if rst else "-"
+    party = party.group(1) if party else "-"
+    material = material.group(1) if material else "-"
+    bags = bags.group(1) if bags else "-"
+    time_text = time_match.group(1) if time_match else "-"
+
+    msg = (
+        "💰 PAYMENT CALCULATION\n\n"
+        f"🧾 RST No : {rst}\n"
+        f"🚛 Vehicle : {vehicle}\n\n"
+        f"👤 Party : {party}\n"
+        f"🌾 Material : {material}\n"
+        f"📦 Bags : {bags}\n\n"
+        f"🕒 Weighment Time : {time_text}\n\n"
+        f"⚖ Net Weight : {net_kg:,} Kg\n"
+        f"📊 Net Quintals : {quintals:.2f}\n\n"
+        f"💵 Rate : ₹{rate} / Quintal\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        f"💰 TOTAL AMOUNT : ₹{total:,}\n"
+        "━━━━━━━━━━━━━━━━"
+    )
+
+    await update.message.reply_text(msg)
+
+
+# ================= TELEGRAM LISTENER =================
+def start_telegram_listener():
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, rate_reply)
+    )
+
+    app.run_polling()
+
+
 # ================= EMAIL CHECK =================
 def check_mail():
+
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_USER, EMAIL_PASS)
     mail.select("inbox")
@@ -167,16 +237,20 @@ def check_mail():
     mail_ids = messages[0].split()
 
     for mail_id in mail_ids:
+
         status, msg_data = mail.fetch(mail_id, "(RFC822)")
         raw_email = msg_data[0][1]
+
         msg = email.message_from_bytes(raw_email)
 
         subject = safe_decode(msg.get("Subject"))
+
         if not any(k in subject.upper() for k in KEYWORDS):
             mail.store(mail_id, "+FLAGS", "\\Seen")
             continue
 
         for part in msg.walk():
+
             filename = part.get_filename()
             content_type = part.get_content_type()
 
@@ -184,7 +258,9 @@ def check_mail():
                 (filename and filename.lower().endswith(".pdf"))
                 or content_type == "application/pdf"
             ):
+
                 data = part.get_payload(decode=True)
+
                 if data:
                     info = extract_from_pdf_bytes(data)
                     process_weighment(info)
@@ -196,7 +272,11 @@ def check_mail():
 
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
+
+    threading.Thread(target=start_telegram_listener).start()
+
     while True:
+
         try:
             check_mail()
 
